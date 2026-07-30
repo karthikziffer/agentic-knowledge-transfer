@@ -1,4 +1,4 @@
-# Skill Builder
+# agentic-knowledge-transfer
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Next.js 16](https://img.shields.io/badge/Next.js-16-black)
@@ -26,7 +26,7 @@ prompt-driven agent — all generated from that one recording.
 
 ```bash
 git clone https://github.com/karthikziffer/agentic-knowledge-transfer.git
-cd skill-builder
+cd agentic-knowledge-transfer
 docker compose up --build
 ```
 

@@ -1,7 +1,12 @@
+# Pins the Compose project name (otherwise derived from this directory's
+# name) so containers/network read as "agentic-knowledge-transfer-*"
+# regardless of what the local folder is called.
+name: agentic-knowledge-transfer
+
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: skill_builder_postgres
+    container_name: agentic-knowledge-transfer-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: skillbuilder
@@ -19,7 +24,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: skill_builder_redis
+    container_name: agentic-knowledge-transfer-redis
     restart: unless-stopped
     ports:
       - "6381:6379"
@@ -33,7 +38,7 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: skill_builder_minio
+    container_name: agentic-knowledge-transfer-minio
     restart: unless-stopped
     environment:
       # CHANGEME: same story as SESSION_SECRET below — public defaults, fine
@@ -54,7 +59,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
-    container_name: skill_builder_clickhouse
+    container_name: agentic-knowledge-transfer-clickhouse
     restart: unless-stopped
     environment:
       # CHANGEME: same story as SESSION_SECRET below — public defaults, fine
@@ -85,7 +90,7 @@ services:
     # memgraph-mage (not the bare memgraph image) — bundles mgconsole, used
     # by the healthcheck below, plus the MAGE graph-algorithms library.
     image: memgraph/memgraph-mage:latest
-    container_name: skill_builder_memgraph
+    container_name: agentic-knowledge-transfer-memgraph
     restart: unless-stopped
     ports:
       - "7688:7687" # Bolt protocol — see src/server/graphDb.ts
@@ -97,9 +102,9 @@ services:
       timeout: 5s
       retries: 10
 
-  skill-builder:
+  app:
     build: .
-    container_name: skill_builder
+    container_name: agentic-knowledge-transfer
     ports:
       - "3100:3000"
     environment:
@@ -115,7 +120,11 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-skillbuilder_analytics}
       # Screenshots and trace.zip live in this MinIO bucket, not on the
       # local filesystem — see src/server/artifacts.ts. Auto-created on
-      # first run if it doesn't exist.
+      # first run if it doesn't exist. Default bucket name intentionally
+      # still says "skill-builder" (this project's former name) rather than
+      # matching the rename above — changing it would point at a brand-new,
+      # empty bucket and orphan every artifact already stored under the old
+      # name.
       MINIO_ENDPOINT: minio
       MINIO_PORT: "9000"
       MINIO_USE_SSL: "false"
@@ -171,18 +180,18 @@ services:
       - "host.docker.internal:host-gateway"
 
   # Runs the alternative-suggestion pipeline (src/server/alternativesAgent.ts)
-  # out-of-process from the web server — same image as skill-builder, just a
-  # different command (worker.ts instead of server.ts). Picks jobs off the
+  # out-of-process from the web server — same image as the app service, just
+  # a different command (worker.ts instead of server.ts). Picks jobs off the
   # "alternatives" BullMQ queue in Redis and relays progress/results back to
   # the web server via Redis pub/sub (src/server/redisPubSub.ts) rather than
   # an in-memory EventEmitter, since it's a separate container. Every other
-  # job type (crawl/validate/replay/manual-record) still runs inside
-  # skill-builder itself — those need tight WebSocket round-trip latency for
-  # live view/control that only makes sense in the same process as the
-  # WebSocket server (see src/server/queue.ts).
+  # job type (crawl/validate/replay/manual-record) still runs inside the app
+  # service itself — those need tight WebSocket round-trip latency for live
+  # view/control that only makes sense in the same process as the WebSocket
+  # server (see src/server/queue.ts).
   worker:
     build: .
-    container_name: skill_builder_worker
+    container_name: agentic-knowledge-transfer-worker
     command: sh -c "npx prisma migrate deploy && npm run worker:start"
     environment:
       NODE_ENV: production
@@ -206,15 +215,26 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    # Same reasoning as skill-builder above — this container also launches
+    # Same reasoning as the app service above — this container also launches
     # real Chromium instances (launchExplorationBrowser).
     shm_size: "1gb"
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+# Explicit `name:` on each volume pins it to the actual on-disk Docker
+# volume from before this project was renamed (Compose otherwise derives
+# volume names from the project name above, e.g. "postgres_data" would
+# become "agentic-knowledge-transfer_postgres_data" — a fresh, empty
+# volume) — this keeps existing local data (accounts, runs, artifacts,
+# the action graph) intact across the rename.
 volumes:
   postgres_data:
+    name: skill-builder_postgres_data
   redis_data:
+    name: skill-builder_redis_data
   minio_data:
+    name: skill-builder_minio_data
   clickhouse_data:
+    name: skill-builder_clickhouse_data
   memgraph_data:
+    name: skill-builder_memgraph_data

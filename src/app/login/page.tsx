@@ -44,10 +44,10 @@ export default function LoginPage() {
       <div className="flex w-full max-w-sm flex-col gap-6">
         <div className="flex flex-col items-center gap-2 text-center">
           <span className="mb-1 flex h-9 w-9 items-center justify-center rounded-lg bg-accent text-base font-bold text-white">
-            S
+            A
           </span>
           <h1 className="page-title">Sign in</h1>
-          <p className="text-[13px] text-ink-muted">Welcome back to Skill Builder.</p>
+          <p className="text-[13px] text-ink-muted">Welcome back to agentic-knowledge-transfer.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="card flex flex-col gap-3 p-5">

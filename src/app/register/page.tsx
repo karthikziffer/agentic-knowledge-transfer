@@ -44,7 +44,7 @@ export default function RegisterPage() {
       <div className="flex w-full max-w-sm flex-col gap-6">
         <div className="flex flex-col items-center gap-2 text-center">
           <span className="mb-1 flex h-9 w-9 items-center justify-center rounded-lg bg-accent text-base font-bold text-white">
-            S
+            A
           </span>
           <h1 className="page-title">Create an account</h1>
           <p className="text-[13px] text-ink-muted">

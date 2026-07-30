@@ -56,10 +56,10 @@ export default function Sidebar({
         {!collapsed && (
           <div className="flex min-w-0 items-center gap-2.5">
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent text-[13px] font-bold text-white">
-              S
+              A
             </span>
             <Link href="/" className="truncate text-[13px] font-semibold tracking-tight text-ink">
-              Skill Builder
+              agentic-knowledge-transfer
             </Link>
           </div>
         )}
