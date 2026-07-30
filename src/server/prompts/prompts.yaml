@@ -1,0 +1,155 @@
+# All LLM prompt text used by the LangGraph agents in src/server/. Kept out
+# of the .ts files so prompt wording can be edited without touching code.
+# Composition (which lines get included, loops, conditionals) still lives in
+# the agent code — this file only holds the text and {{placeholder}} slots.
+
+agent:
+  planSteps:
+    system: >-
+      You break a free-text browser-automation instruction into an ordered
+      list of short, single-action steps, for an agent that will look up
+      each one against a catalog of real, previously-discovered page actions
+      and click the closest match. Every step must describe exactly one
+      concrete UI action (e.g. "click the Quickstart link", "click the
+      Install button") — never a goal, a multi-part instruction, or
+      commentary.
+    human: |-
+      Instruction: {{prompt}}
+
+      Break this into an ordered list of single-action steps. Respond with
+      one step per line, in exactly this format: "<n>. <short imperative
+      description of one action>". Do not add any other text.
+
+  chooseCandidate:
+    system: >-
+      You pick which one real, already-discovered page action (if any)
+      genuinely matches a single planned automation step, from a short
+      ranked list of candidates found by similarity search. Only pick one
+      you're genuinely confident matches the step's intent — saying none is
+      fine, and better than a bad guess.
+    human: |-
+      Planned step: {{step}}
+
+      Candidates found on the page (ranked by similarity, most similar first):
+      {{candidatesList}}
+
+      Respond in exactly this format, both lines required:
+      Pick: <number, or "none" if nothing above genuinely matches this step>
+      Reasoning: 1 short sentence on why.
+
+alternativesAgent:
+  explorePage:
+    system: >-
+      You describe, in 2-3 plain-language sentences, what kind of page this
+      is and what a visitor can do on it — grounded only in what you actually
+      see in the screenshot.
+    human: |-
+      Real interactive elements found on this page:
+      {{list}}
+
+      Look at the attached screenshot and describe the page.
+
+  decideAlternatives:
+    system: >-
+      You pick genuinely meaningful, distinct alternative actions from a list
+      of real elements found on a web page, for someone exploring what else a
+      recorded browser flow could have done instead.
+    pageUnderstandingLine: "Page understanding: {{pageUnderstanding}}"
+    targetClickedLine: "The recorded step clicked: {{targetDescription}}"
+    elementsLine: |-
+      Real elements found on this page:
+      {{list}}
+    instructionsLine: >-
+      Pick up to {{maxSuggestions}} that are genuinely distinct, meaningful
+      alternative actions to the recorded step above. Skip anything that's
+      essentially the same action, decorative, or clearly irrelevant (logo,
+      cookie banner, social icons).
+    formatLine: >-
+      Respond with one line per pick, in exactly this format: "<index>:
+      <one-line reason this is a meaningful alternative>". Only use indices
+      from the list above — do not invent new ones.
+
+driftAssist:
+  suggest:
+    system: >-
+      You compare a browser element that was clicked during a recorded
+      session against several current candidates on the same page, and
+      decide which candidate (if any) is genuinely the same element.
+    flowContextLine: "Flow narrative (what this whole recorded session was for): {{flowNarrative}}"
+    stepCaptionLine: "This specific step was previously described as: {{stepCaption}}"
+    human: |-
+      The first image is a screenshot from when this element was originally recorded.
+      Originally recorded target: {{targetDescription}}
+
+      The second image is the current page, with every current candidate for that same element outlined in red and numbered.
+
+      Candidates:
+      {{candidatesList}}
+
+      Look at both images and decide which numbered candidate (if any) is genuinely the same element as the one described above — same purpose and position, not just similar-looking. If a flow narrative or step description is given above, use it as context for *which* one makes sense, not just which one looks similar — two visually-identical candidates can still be told apart by what the flow is actually trying to do.
+
+      Respond in exactly this format, all three lines required:
+      Match: <number, or "none" if you're not confident any of them are the same element>
+      Confidence: <high, medium, or low — "high" only if you are confident enough that this could be clicked automatically with no human review; "medium" if it's a reasonable guess a human should still confirm; "low" if you are genuinely unsure>
+      Reasoning: 1-2 sentences on what you compared and why.
+
+  suggestWholePage:
+    system: >-
+      You decide what a human should click next on a web page to continue a
+      recorded browser flow, for a step whose originally recorded element can
+      no longer be found or matched with confidence.
+    human: |-
+      Flow narrative (what this whole recorded session was for): {{flowNarrative}}
+
+      The stuck step was previously described as: {{stepCaption}}
+      Originally recorded target: {{targetDescription}}
+
+      Here is a screenshot of the current page, and every real clickable element found on it, numbered:
+      {{elementsList}}
+
+      Decide which numbered element (if any) best continues the flow described above. Only pick one you're genuinely confident about — saying none is fine, and better than a bad guess.
+
+      Respond in exactly this format, all three lines required:
+      Pick: <number, or "none" if nothing on this page looks right>
+      Confidence: <high, medium, or low — "high" only if you are confident enough that this could be clicked automatically with no human review; "medium" if it's a reasonable guess a human should still confirm; "low" if you are genuinely unsure>
+      Reasoning: 1-2 sentences on what you're picking and why.
+
+flowSummary:
+  captionStep:
+    system: >-
+      You are narrating, with evidence, a single step of a recorded browser
+      session for a non-technical reader who cannot see the screenshot
+      themselves.
+    stepTypeLine: "Step type: {{stepType}}"
+    descriptionLine: "Recorded description: {{description}}"
+    urlLine: "Page URL: {{url}}"
+    instructions: |-
+      Look at the attached screenshot and respond in exactly this format, both lines required:
+      Reasoning: 1-2 sentences on what you actually observe in the screenshot (layout, text, controls) and why that indicates this step happened.
+      Caption: one short, plain-language sentence stating what the user did and what visibly changed. Do not mention HTML or the DOM.
+
+  synthesize:
+    system: >-
+      You write clear, concise, plain-language summaries of recorded browser
+      sessions.
+    human: |-
+      You are writing a short, plain-language recap of a recorded browser session for someone who did not watch it.
+
+      Skill: {{skillName}}
+      Start URL: {{startUrl}}
+      Goal / prompt: {{promptText}}
+      Outcome status: {{statusLine}}
+      Duration: {{duration}}
+
+      Step-by-step captions, in order:
+      {{stepsList}}
+
+      Respond in exactly this structure:
+      ## Summary
+      <one short paragraph, 2-4 sentences, narrating the flow as a story>
+      ## Key steps
+      - <bullet>
+      - <bullet>
+      (3-6 bullets covering the most important actions)
+      ## Outcome
+      <one sentence stating whether it succeeded and why>

@@ -1,0 +1,220 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: skill_builder_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: skillbuilder
+      POSTGRES_PASSWORD: skillbuilder
+      POSTGRES_DB: skillbuilder
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillbuilder"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: skill_builder_redis
+    restart: unless-stopped
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: skill_builder_minio
+    restart: unless-stopped
+    environment:
+      # CHANGEME: same story as SESSION_SECRET below — public defaults, fine
+      # for a local try-it-out, not for anything reachable by anyone else.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin-changeme}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9002:9000" # S3 API
+      - "9003:9001" # Web console (login with the credentials above)
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: skill_builder_clickhouse
+    restart: unless-stopped
+    environment:
+      # CHANGEME: same story as SESSION_SECRET below — public defaults, fine
+      # for a local try-it-out, not for anything reachable by anyone else.
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-skillbuilder}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse-changeme}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-skillbuilder_analytics}
+    ports:
+      - "8124:8123" # HTTP interface — what the app's client uses
+      - "9004:9000" # native protocol — for connecting with clickhouse-client
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    # ClickHouse's own docs recommend raising the open-files limit for the
+    # Docker image; the default can otherwise trip "too many open files"
+    # under normal load.
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      # The clickhouse-server image doesn't include curl, only wget.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  memgraph:
+    # memgraph-mage (not the bare memgraph image) — bundles mgconsole, used
+    # by the healthcheck below, plus the MAGE graph-algorithms library.
+    image: memgraph/memgraph-mage:latest
+    container_name: skill_builder_memgraph
+    restart: unless-stopped
+    ports:
+      - "7688:7687" # Bolt protocol — see src/server/graphDb.ts
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 0;' | mgconsole || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  skill-builder:
+    build: .
+    container_name: skill_builder
+    ports:
+      - "3100:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://skillbuilder:skillbuilder@postgres:5432/skillbuilder
+      REDIS_URL: redis://redis:6379
+      # Run-lifecycle analytics events (created/started/completed/error) —
+      # see src/server/analytics.ts. The table is auto-created on first use;
+      # never blocks or fails a run if unreachable.
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-skillbuilder}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse-changeme}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-skillbuilder_analytics}
+      # Screenshots and trace.zip live in this MinIO bucket, not on the
+      # local filesystem — see src/server/artifacts.ts. Auto-created on
+      # first run if it doesn't exist.
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: ${MINIO_BUCKET:-skill-builder-artifacts}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin-changeme}
+      # Caps how many Chromium instances run at once — extra "Run" clicks
+      # queue in Redis instead of piling up browser processes.
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
+      # Ollama runs on the host, not in this compose stack — Docker Desktop
+      # (Mac/Windows) resolves host.docker.internal to the host machine
+      # automatically, no extra config needed. Override if Ollama lives
+      # somewhere else. See src/server/ollama.ts / Settings -> Ollama.
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      # Vision-capable Ollama model used by the on-demand "Flow summary"
+      # agent (src/server/flowSummary.ts) to caption run screenshots and
+      # narrate the session. Must already be pulled on the Ollama server
+      # above — override if you use a different vision model.
+      FLOW_SUMMARY_MODEL: ${FLOW_SUMMARY_MODEL:-qwen2.5vl:latest}
+      # The action graph (src/server/actionGraph.ts, src/server/graphDb.ts) —
+      # crawled pages/actions and their embeddings for prompt-based retrieval.
+      MEMGRAPH_URL: bolt://memgraph:7687
+      # Embedding model for action-graph retrieval (src/server/embeddings.ts).
+      # Must already be pulled on the Ollama server above, same as
+      # FLOW_SUMMARY_MODEL — e.g. `ollama pull nomic-embed-text`.
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      # CHANGEME: this default is public (it's in the repo) and lets anyone
+      # forge a login for any account. Fine for a local eval; before
+      # deploying anywhere reachable by others, set a real SESSION_SECRET in
+      # .env (generate one with: openssl rand -base64 32).
+      SESSION_SECRET: ${SESSION_SECRET:-insecure-dev-secret-changeme}
+      # CHANGEME: same story as SESSION_SECRET — this encrypts stored
+      # global variable values. Generate one with: openssl rand -base64 32
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-insecure-dev-encryption-key-changeme}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      memgraph:
+        condition: service_healthy
+    # Playwright's Chromium sandbox needs more /dev/shm than Docker's 64MB default.
+    shm_size: "1gb"
+    # Lets a per-user Ollama base URL of http://host.docker.internal:PORT/v1
+    # reach the host machine's Ollama server from inside the container.
+    # Docker Desktop (Mac/Windows) already resolves this; Linux needs the
+    # explicit host-gateway mapping below.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Runs the alternative-suggestion pipeline (src/server/alternativesAgent.ts)
+  # out-of-process from the web server — same image as skill-builder, just a
+  # different command (worker.ts instead of server.ts). Picks jobs off the
+  # "alternatives" BullMQ queue in Redis and relays progress/results back to
+  # the web server via Redis pub/sub (src/server/redisPubSub.ts) rather than
+  # an in-memory EventEmitter, since it's a separate container. Every other
+  # job type (crawl/validate/replay/manual-record) still runs inside
+  # skill-builder itself — those need tight WebSocket round-trip latency for
+  # live view/control that only makes sense in the same process as the
+  # WebSocket server (see src/server/queue.ts).
+  worker:
+    build: .
+    container_name: skill_builder_worker
+    command: sh -c "npx prisma migrate deploy && npm run worker:start"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://skillbuilder:skillbuilder@postgres:5432/skillbuilder
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: ${MINIO_BUCKET:-skill-builder-artifacts}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin-changeme}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      FLOW_SUMMARY_MODEL: ${FLOW_SUMMARY_MODEL:-qwen2.5vl:latest}
+      # Caps how many alternative-suggestion jobs (each a real Chromium
+      # launch + two LLM calls) run at once in this worker.
+      MAX_CONCURRENT_ALTERNATIVES: ${MAX_CONCURRENT_ALTERNATIVES:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Same reasoning as skill-builder above — this container also launches
+    # real Chromium instances (launchExplorationBrowser).
+    shm_size: "1gb"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  clickhouse_data:
+  memgraph_data:

@@ -1,0 +1,315 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------
+   Skill Builder design tokens.
+
+   Direction: light fintech-SaaS dashboard — soft gray app shell, white
+   cards lifted with a hairline border + soft shadow, a single confident
+   blue accent, and color-coded status pills (queued=gray, running=blue,
+   done=green, error=red, manual=violet — a human is driving). Status is
+   dual-coded: color carries the fast read, the glyph (StatusBadge) keeps
+   it accessible without color. Monospace for anything technical (run ids,
+   timestamps, statuses, URLs).
+   --------------------------------------------------------------------- */
+
+:root {
+  --shell: #f3f4f7;
+  --surface: #ffffff;
+  --surface-2: #f5f6f9;
+  --edge: #e6e8ef;
+  --edge-strong: #d7dae3;
+
+  --ink: #14161c;
+  --ink-muted: #6b7280;
+  --ink-faint: #9aa1ac;
+
+  --accent: #3457f5;
+  --accent-hover: #2643d6;
+  --accent-soft: #eaeffe;
+
+  --queued: #8b93a1;
+  --queued-soft: #f0f1f4;
+  --running: #3457f5;
+  --running-soft: #eaeffe;
+  --done: #16a34a;
+  --done-soft: #e7f8ed;
+  --error: #dc2626;
+  --error-soft: #fdecec;
+  --manual: #9333ea;
+  --manual-soft: #f4ebfc;
+}
+
+@theme inline {
+  --color-shell: var(--shell);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-edge: var(--edge);
+  --color-edge-strong: var(--edge-strong);
+
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-queued: var(--queued);
+  --color-queued-soft: var(--queued-soft);
+  --color-running: var(--running);
+  --color-running-soft: var(--running-soft);
+  --color-done: var(--done);
+  --color-done-soft: var(--done-soft);
+  --color-error: var(--error);
+  --color-error-soft: var(--error-soft);
+  --color-manual: var(--manual);
+  --color-manual-soft: var(--manual-soft);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--shell);
+  color: var(--ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01";
+}
+
+::selection {
+  background: var(--accent);
+  color: white;
+}
+
+* {
+  border-color: var(--edge);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@layer components {
+  /* Buttons — combine the base with exactly one variant, e.g.
+     className="btn btn-primary" */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-all duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-accent text-white shadow-sm hover:-translate-y-px hover:bg-accent-hover hover:shadow-md active:translate-y-0;
+  }
+  .btn-secondary {
+    @apply border border-edge-strong bg-surface text-ink hover:bg-surface-2;
+  }
+  .btn-ghost {
+    @apply text-ink-muted hover:bg-surface-2 hover:text-ink;
+  }
+  .btn-danger {
+    @apply border border-error/30 text-error hover:bg-error hover:text-white;
+  }
+
+  /* Small spinner for busy buttons — pair with a "Saving…"-style label,
+     e.g. {busy && <Spinner />}{busy ? "Saving…" : "Save"} */
+  .spinner {
+    @apply inline-block h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent opacity-70;
+  }
+
+  /* Form fields */
+  .field-label {
+    @apply flex flex-col gap-1.5 text-[13px] font-medium text-ink;
+  }
+  .field-hint {
+    @apply text-xs font-normal text-ink-faint;
+  }
+  .input {
+    @apply w-full rounded-md border border-edge-strong bg-surface px-2.5 py-2 text-[13px] text-ink transition-colors duration-150 placeholder:text-ink-faint focus:border-accent focus:ring-[3px] focus:ring-accent/15 focus:outline-none;
+  }
+
+  /* Surfaces */
+  .card {
+    @apply rounded-xl border border-edge bg-surface shadow-[0_1px_2px_rgba(20,22,28,0.04)];
+  }
+  /* Interactive card variant — a clickable card that should feel liftable
+     (list-item cards, not static form cards). */
+  .card-hover {
+    @apply transition-all duration-150 hover:-translate-y-px hover:border-edge-strong hover:shadow-md;
+  }
+  .row {
+    @apply border-b border-edge px-4 py-3 transition-colors duration-150 last:border-b-0 odd:bg-transparent even:bg-surface-2/40 hover:bg-accent-soft/60;
+  }
+
+  /* Typography helpers */
+  .page-title {
+    @apply text-[26px] leading-tight font-bold tracking-tight text-ink;
+  }
+  .eyebrow {
+    @apply font-mono text-[11px] font-medium tracking-wider text-ink-faint uppercase;
+  }
+  .mono {
+    @apply font-mono;
+  }
+
+  /* Empty state — replaces bare "No X yet." text with a dashed, centered
+     placeholder that reads as intentional rather than an unfinished page. */
+  .empty-state {
+    @apply flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-edge-strong bg-surface-2/40 px-6 py-10 text-center;
+  }
+
+  /* Row-hover affordance for clickable list rows — pair with `group` on
+     the wrapping <li>/<Link>: <span class="row-chevron">›</span> */
+  .row-chevron {
+    @apply ml-2 shrink-0 -translate-x-1 text-ink-faint opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100;
+  }
+
+  /* Dotted canvas background for the run-flow diagram — a faint grid of
+     dots reads as "infinite canvas" without competing with the node
+     cards drawn on top of it. */
+  .canvas-dots {
+    background-color: var(--surface-2);
+    background-image: radial-gradient(circle, var(--edge-strong) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+
+  /* Status pill — dual-coded: a soft color fill for the fast read, the
+     glyph (rendered by StatusBadge, not by CSS) keeps it legible without
+     color too. Usage: <span class="pill pill-running">● running</span> */
+  .pill {
+    @apply inline-flex w-fit items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[11px] font-medium tracking-wide uppercase;
+  }
+  .pill-queued {
+    @apply border-transparent bg-queued-soft text-ink-muted;
+  }
+  .pill-running {
+    @apply border-transparent bg-running-soft text-running;
+  }
+  .pill-done {
+    @apply border-transparent bg-done-soft text-done;
+  }
+  .pill-error {
+    @apply border-transparent bg-error-soft text-error;
+  }
+  .pill-manual {
+    @apply border-transparent bg-manual-soft text-manual;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pill-running .pill-glyph {
+    animation: pulse-dot 1.4s ease-in-out infinite;
+  }
+  .skeleton {
+    animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  }
+
+  /* Flow-summary progress (FlowSummaryView.tsx) — a spinning ring while a
+     phase has no known fraction, a light sweep across the determinate bar,
+     a pop on the step counter each time it advances, and a soft fade when
+     the phase label itself changes. */
+  .progress-ring-indeterminate {
+    animation: progress-ring-spin 1s linear infinite;
+  }
+  .progress-bar-shimmer {
+    animation: progress-bar-sweep 1.3s ease-in-out infinite;
+  }
+  .progress-pop {
+    animation: progress-pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  .progress-fade-in {
+    animation: progress-fade-in 0.35s ease both;
+  }
+  .progress-dot {
+    animation: progress-dot-bounce 1s ease-in-out infinite;
+  }
+
+  /* Toast.tsx — a small slide-up-and-settle on mount so a new toast reads
+     as "just arrived" instead of just popping into place. */
+  .toast-enter {
+    animation: toast-in 0.25s ease-out both;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes skeleton-shimmer {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes progress-ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes progress-bar-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes progress-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes progress-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes progress-dot-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

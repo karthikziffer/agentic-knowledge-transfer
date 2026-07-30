@@ -1,0 +1,7 @@
+node_modules
+.next
+artifacts
+.git
+*.log
+.env
+.env.local
