@@ -25,29 +25,48 @@ export default function CreateSessionButton({
   async function startRun() {
     setStarting(true);
     setError(null);
-    const res = await fetch(`/api/prompts/${promptId}/runs`, { method: "POST" });
-    const body = await res.json();
-    setStarting(false);
-    if (!res.ok) {
-      const message = body.error ?? "Failed to start session";
+    try {
+      const res = await fetch(`/api/prompts/${promptId}/runs`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) {
+        const message = body.error ?? "Failed to start session";
+        setError(message);
+        toast.error(message);
+        return;
+      }
+      router.refresh();
+    } catch (err) {
+      // A network-level failure (fetch itself throwing, e.g. the server was
+      // unreachable for a moment) — without this catch, the exception would
+      // skip straight past setStarting(false) below and leave the button
+      // stuck showing "Starting…" forever, unrecoverable without a reload.
+      const message = err instanceof Error ? err.message : "Failed to start session";
       setError(message);
       toast.error(message);
-      return;
+    } finally {
+      setStarting(false);
     }
-    router.refresh();
   }
 
   async function stopRun() {
     if (!runId) return;
     setStopping(true);
-    const res = await fetch(`/api/runs/${runId}/stop`, { method: "POST" });
-    setStopping(false);
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      toast.error(body.error ?? "Failed to stop session");
-      return;
+    try {
+      const res = await fetch(`/api/runs/${runId}/stop`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        toast.error(body.error ?? "Failed to stop session");
+        return;
+      }
+      router.refresh();
+    } catch (err) {
+      // Same reasoning as startRun's catch above — otherwise a network-level
+      // failure leaves this button stuck showing "Stopping…" forever.
+      const message = err instanceof Error ? err.message : "Failed to stop session";
+      toast.error(message);
+    } finally {
+      setStopping(false);
     }
-    router.refresh();
   }
 
   if (isActive) {

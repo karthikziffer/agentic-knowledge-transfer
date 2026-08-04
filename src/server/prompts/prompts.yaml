@@ -86,6 +86,8 @@ driftAssist:
       Candidates:
       {{candidatesList}}
 
+      Some candidates are annotated with a distance in pixels from where the original click actually landed, and/or a percent similarity between the text immediately surrounding this candidate now and the text that surrounded the recorded element (e.g. neighboring row/label text). Treat both as supporting evidence, not hard rules: a small distance or a high similarity is a good sign, but the page may have shifted, or nearby content may have changed slightly (a price, a count), since it was recorded — so neither being off rules a candidate out, and neither being close on its own makes a candidate right. Weigh them together with what you see in the images and the flow context.
+
       Look at both images and decide which numbered candidate (if any) is genuinely the same element as the one described above — same purpose and position, not just similar-looking. If a flow narrative or step description is given above, use it as context for *which* one makes sense, not just which one looks similar — two visually-identical candidates can still be told apart by what the flow is actually trying to do.
 
       Respond in exactly this format, all three lines required:

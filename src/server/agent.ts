@@ -1,6 +1,6 @@
 import { SystemMessage, HumanMessage, type MessageContent } from "@langchain/core/messages";
 import type { RunJob } from "./runManager";
-import { launchRunBrowser, finalizeRunSession, screenshotStep, moveCursorOverlay, triggerClickRipple } from "./automation";
+import { launchRunBrowser, finalizeRunSession, screenshotStep, glideCursorTo, triggerClickRipple, settleAfterAction } from "./automation";
 import { clickResilient } from "./variation";
 import { resolveLocator } from "./locatorReplay";
 import { persistRun } from "./runs";
@@ -44,11 +44,14 @@ async function planSteps(instruction: string): Promise<string[]> {
 // by embedding distance, which is a good shortlist but not always the right
 // pick (e.g. "log out" and "log in" read as similar text); this is the
 // judgment call on top of that shortlist. Saying "none" is a valid, and
-// often correct, answer.
+// often correct, answer. Returns the reasoning alongside the pick (not just
+// the winner) so the caller can attach the full decision — including why a
+// step matched nothing — onto the step for the UI to show, rather than
+// this judgment call being a black box.
 async function chooseCandidate(
   step: string,
   candidates: SearchActionResult[],
-): Promise<SearchActionResult | null> {
+): Promise<{ chosen: SearchActionResult | null; index: number | null; reasoning: string }> {
   const candidatesList = candidates
     .map((c, i) => `${i}. ${c.description} (${c.status}, role: ${c.role}, similarity: ${c.similarity.toFixed(2)})`)
     .join("\n");
@@ -58,10 +61,14 @@ async function chooseCandidate(
   ]);
   const text = messageContentToText(response.content);
   const pickMatch = text.match(/Pick:\s*(none|\d+)/i);
+  const reasoningMatch = text.match(/Reasoning:\s*([\s\S]*)$/i);
   const pickValue = pickMatch?.[1]?.toLowerCase();
   const index = pickValue && pickValue !== "none" && /^\d+$/.test(pickValue) ? Number(pickValue) : null;
-  if (index === null || index < 0 || index >= candidates.length) return null;
-  return candidates[index];
+  const reasoning = reasoningMatch?.[1]?.trim() ?? text.trim();
+  if (index === null || index < 0 || index >= candidates.length) {
+    return { chosen: null, index: null, reasoning };
+  }
+  return { chosen: candidates[index], index, reasoning };
 }
 
 // Prompt-driven execution of a skill: takes a free-text instruction (set on
@@ -121,14 +128,29 @@ export async function agentTask(job: RunJob): Promise<void> {
     for (const step of steps) {
       if (job.stopRequested) break;
       const startedAt = new Date().toISOString();
+      // Built up as the step progresses so it's attached to whichever
+      // outcome (success or failure) actually happens below — candidates is
+      // the only part that might be genuinely empty (no known actions
+      // found at all, before the picker LLM even runs).
+      const decision: NonNullable<
+        Parameters<typeof job.addStep>[0]["agentDecision"]
+      > = { plannedStep: step, candidates: [], pickedIndex: null, reasoning: "" };
 
       try {
         const candidates = await searchActions(skillId, step, CANDIDATES_PER_STEP);
+        decision.candidates = candidates.map((c) => ({
+          description: c.description,
+          similarity: c.similarity,
+          status: c.status,
+          role: c.role,
+        }));
         if (candidates.length === 0) {
           throw new Error("No known actions found in the action graph for this step");
         }
 
-        const chosen = await chooseCandidate(step, candidates);
+        const { chosen, index, reasoning } = await chooseCandidate(step, candidates);
+        decision.pickedIndex = index;
+        decision.reasoning = reasoning;
         if (!chosen) {
           throw new Error("No cataloged action confidently matched this step");
         }
@@ -142,11 +164,12 @@ export async function agentTask(job: RunJob): Promise<void> {
 
         const box = await resolved.boundingBox().catch(() => null);
         if (box) {
-          moveCursorOverlay(cdp, box.x + box.width / 2, box.y + box.height / 2);
+          await glideCursorTo(page, cdp, box.x + box.width / 2, box.y + box.height / 2);
           triggerClickRipple(cdp, box.x + box.width / 2, box.y + box.height / 2);
         }
         await clickResilient(resolved, 5000);
         await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+        await settleAfterAction(page);
         succeeded++;
 
         const resultStep = job.addStep({
@@ -157,6 +180,7 @@ export async function agentTask(job: RunJob): Promise<void> {
           finishedAt: new Date().toISOString(),
           url: page.url(),
           locator: chosen.locator,
+          agentDecision: decision,
         });
         resultStep.screenshot = await screenshotStep(page, job.record.id, resultStep.index).catch(() => undefined);
         job.updateStep(resultStep.index, resultStep);
@@ -171,6 +195,7 @@ export async function agentTask(job: RunJob): Promise<void> {
           startedAt,
           finishedAt: new Date().toISOString(),
           url: page.url(),
+          agentDecision: decision,
         });
         resultStep.screenshot = await screenshotStep(page, job.record.id, resultStep.index).catch(() => undefined);
         job.updateStep(resultStep.index, resultStep);

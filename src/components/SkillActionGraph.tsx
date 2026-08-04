@@ -16,6 +16,7 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import EmptyState from "@/components/EmptyState";
 import LiveRunView from "@/components/LiveRunView";
+import DepthGoalEditor, { type DepthGoalRow } from "@/components/DepthGoalEditor";
 import { useToast } from "@/components/Toast";
 import type { ElementLocator } from "@/server/types";
 
@@ -110,6 +111,7 @@ function stubColor(actions: GraphEdge[]): string {
 
 interface PageNodeData extends Record<string, unknown> {
   description: string;
+  url: string;
   imageUrl?: string;
 }
 
@@ -162,6 +164,7 @@ function buildFlowGraph(nodes: GraphNode[], edges: GraphEdge[]): { flowNodes: No
     position: { x: 0, y: 0 },
     data: {
       description: n.description,
+      url: n.url,
       imageUrl:
         n.screenshotArtifact && n.screenshotRunId
           ? `/api/artifacts/${n.screenshotRunId}/${n.screenshotArtifact}`
@@ -252,8 +255,16 @@ function PageNodeComponent({ data }: { data: PageNodeData }) {
           no preview
         </div>
       )}
-      <div className="truncate px-2 py-1.5 text-[11px] text-ink" title={data.description}>
+      <div className="truncate px-2 pt-1.5 text-[11px] text-ink" title={data.description}>
         {data.description}
+      </div>
+      {/* Distinct pages can (and often do) share the exact same <title> —
+          a paginated blog's "older posts" pages, for instance, all render
+          "Home | Karthik" — so the title alone can't tell two real, distinct
+          nodes apart. The URL path always can, since it's what actually
+          keys the node. */}
+      <div className="truncate px-2 pb-1.5 font-mono text-[9px] text-ink-faint" title={data.url}>
+        {hostAndPath(data.url)}
       </div>
       <Handle type="source" position={Position.Right} className="!border-none !bg-ink-faint" />
     </div>
@@ -344,6 +355,12 @@ export default function SkillActionGraph({
   // chosen a smaller count yet" is distinguishable from "the user chose the
   // full count."
   const [validateCount, setValidateCount] = useState<number | null>(null);
+  // Optional per-depth goals for the next crawl (src/server/actionGraph.ts's
+  // DepthGoalTracker) — e.g. [{depth:1,goal:2},{depth:2,goal:4}] means "keep
+  // crawling until 2 genuinely distinct pages one click away and 4 two
+  // clicks away are found," instead of the flat MAX_PAGES/MAX_DEPTH budget.
+  // Empty means unchanged, original behavior.
+  const [depthGoalRows, setDepthGoalRows] = useState<DepthGoalRow[]>([]);
   const [selected, setSelected] = useState<SelectedAction | null>(null);
   // Set when a stub node ("N actions here") is clicked instead of a single
   // edge — mutually exclusive with `selected`, see selectAction/selectGroup.
@@ -399,6 +416,17 @@ export default function SkillActionGraph({
             const message = body.record.error ?? "Crawl failed";
             setCrawlError(message);
             toast.error(message);
+          } else {
+            // A depth-goal shortfall never fails the run itself (see
+            // actionGraph.ts's crawlTask) — it's flagged only on the finish
+            // step, so a genuinely completed crawl can still have something
+            // worth surfacing. Distinct info toast (not the red error one
+            // above) since this isn't a failure, just a site that didn't
+            // have enough distinct pages at some depth.
+            const finishStep = (body.record.steps as { type: string; error?: string }[] | undefined)?.at(-1);
+            if (finishStep?.type === "manual-finish" && finishStep.error?.includes("depth goal")) {
+              toast.info(finishStep.error);
+            }
           }
           setCrawlRunId(null);
           await loadGraph();
@@ -456,6 +484,7 @@ export default function SkillActionGraph({
     };
   }, [validateRunId, loadGraph, toast]);
 
+
   async function startCrawl() {
     setStarting(true);
     setCrawlError(null);
@@ -463,7 +492,7 @@ export default function SkillActionGraph({
       const res = await fetch(`/api/projects/${projectId}/skills/${skillId}/graph/crawl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId }),
+        body: JSON.stringify({ runId, depthGoals: depthGoalRows }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Failed to start crawl");
@@ -581,11 +610,10 @@ export default function SkillActionGraph({
             const score = validationScore(graph.edges);
             return (
               <>
-                <span className="font-medium text-ink">Validation score:</span>
                 <span className="pill pill-done">{score.passed} passed</span>
                 {score.failed > 0 && <span className="pill pill-error">{score.failed} failed</span>}
                 {score.unvalidated > 0 && (
-                  <span className="pill pill-queued">{score.unvalidated} not yet validated</span>
+                  <span className="pill pill-queued">{score.unvalidated} unvalidated</span>
                 )}
               </>
             );
@@ -603,6 +631,25 @@ export default function SkillActionGraph({
         <div className="card flex flex-wrap items-center gap-3 p-5">{controls}</div>
       )}
 
+      {/* Not portaled (unlike `controls` above), since a multi-row editor
+          doesn't fit the shared single-line header row it portals into.
+          Hidden while a crawl/validate run is active — these only take
+          effect on the *next* click. */}
+      {!crawlRunId && !validateRunId && (
+        <DepthGoalEditor
+          rows={depthGoalRows}
+          onChange={setDepthGoalRows}
+          infoText={
+            "Depth = how many link-clicks away from the start page (1 = single-step, 2 = double-step, " +
+            "3 = triple-step, ...). Goal = how many genuinely distinct pages at that depth to keep " +
+            "looking for before moving on — near-duplicate pages (e.g. paginated listings with the " +
+            "same title) don't count toward it. Without any goals, the crawl just explores up to 10 " +
+            "pages, 2 hops deep, and stops."
+          }
+          emptyStateText="Without goals, the crawl explores up to 10 pages, 2 hops deep. Add a goal to keep going until enough genuinely distinct pages are found at each hop-distance instead — e.g. 2 single-step, 4 double-step, 3 triple-step."
+        />
+      )}
+
       {(crawlError || validateError) && (
         <div className="card flex flex-col gap-1.5 p-5">
           {crawlError && <p className="text-[13px] text-error">{crawlError}</p>}
@@ -612,13 +659,35 @@ export default function SkillActionGraph({
 
       {crawlRunId && (
         <div className="lg:h-[420px] lg:min-h-0">
-          <LiveRunView runId={crawlRunId} endControl="stop" />
+          <LiveRunView
+            runId={crawlRunId}
+            endControl="stop"
+            // Fires immediately on a successful Stop (see LiveRunView's
+            // stopRun) instead of waiting for this component's own poll to
+            // notice up to POLL_MS later — Stop should unblock "Build
+            // graph"/"Validate" right away, not after a multi-second delay.
+            onStatusChange={(status) => {
+              if (status === "completed" || status === "error") {
+                setCrawlRunId(null);
+                void loadGraph();
+              }
+            }}
+          />
         </div>
       )}
 
       {validateRunId && (
         <div className="lg:h-[420px] lg:min-h-0">
-          <LiveRunView runId={validateRunId} endControl="stop" />
+          <LiveRunView
+            runId={validateRunId}
+            endControl="stop"
+            onStatusChange={(status) => {
+              if (status === "completed" || status === "error") {
+                setValidateRunId(null);
+                void loadGraph();
+              }
+            }}
+          />
         </div>
       )}
 

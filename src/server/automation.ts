@@ -41,6 +41,17 @@ export async function uploadDomSnapshot(
 // page but draws no cursor of its own, so without this the recording would
 // just show things happening with no indication of where or how.
 //
+// How long the cursor overlay's CSS transition takes to visibly glide to a
+// new point, and how long callers should hold after a click before moving
+// on to the next action — long enough that a human watching the live view
+// (or the recorded video) can actually see the cursor travel and the click
+// land, short enough that a multi-step run doesn't feel sluggish. Kept as
+// TS constants (not just baked into the CSS string below) so glideCursorTo/
+// settleAfterAction's waits stay in sync with what the overlay itself
+// actually animates for.
+export const CURSOR_GLIDE_MS = 400;
+export const ACTION_SETTLE_MS = 350;
+
 // Written as a plain JS string rather than a TS function passed to
 // page.addInitScript(fn) — Playwright serializes a function via
 // fn.toString(), which only captures the function's own source text. Under
@@ -72,7 +83,11 @@ const CURSOR_OVERLAY_SCRIPT = `
           // transform gets its own transition (separate timing/easing from
           // the position ones) so __sbClickRipple below can pulse just the
           // scale without disturbing the left/top tracking transition.
-          transition: "left 0.05s linear, top 0.05s linear, opacity 0.2s, transform 0.15s ease-out",
+          // left/top glide over CURSOR_GLIDE_MS (kept in sync via string
+          // interpolation, not a duplicated literal) — previously 0.05s,
+          // fast enough to be an instant teleport rather than a visible
+          // movement a human watching the live view could actually follow.
+          transition: "left ${CURSOR_GLIDE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), top ${CURSOR_GLIDE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s, transform 0.15s ease-out",
           opacity: "0",
         });
         document.documentElement.appendChild(cursor);
@@ -135,6 +150,25 @@ export function triggerClickRipple(cdp: CDPSession, x: number, y: number) {
       expression: `window.__sbClickRipple && window.__sbClickRipple(${x}, ${y})`,
     })
     .catch(() => {});
+}
+
+// Moves the cursor overlay to (x, y) and holds for CURSOR_GLIDE_MS —
+// exactly as long as its CSS transition takes to actually get there — before
+// returning. Callers driving a live-viewed run (replay/variant/agent/crawl
+// tasks) should await this before triggering a click, so the glide renders
+// as a visible movement instead of moveCursorOverlay+triggerClickRipple+
+// click() all firing in the same tick with nothing in between for a screencast
+// frame to ever catch.
+export async function glideCursorTo(page: Page, cdp: CDPSession, x: number, y: number): Promise<void> {
+  moveCursorOverlay(cdp, x, y);
+  await page.waitForTimeout(CURSOR_GLIDE_MS).catch(() => {});
+}
+
+// Brief pause after an action completes — long enough for its visible
+// result (the click ripple fading, the page reacting) to actually render
+// before the next action starts.
+export async function settleAfterAction(page: Page): Promise<void> {
+  await page.waitForTimeout(ACTION_SETTLE_MS).catch(() => {});
 }
 
 // How long to wait after the last wheel/keystroke event before treating a
@@ -252,7 +286,12 @@ function describeAndLocate(el) {
   var accessibleName = (el.getAttribute("aria-label") || el.innerText || el.getAttribute("alt") || el.getAttribute("title") || "").trim().slice(0, 200);
   var placeholder = (el.getAttribute("placeholder") || "").trim().slice(0, 200);
   var label = accessibleName || placeholder || "";
-  var description = label ? tag + " \\"" + label.replace(/"/g, "'") + "\\"" : tag;
+  // impliedRole (e.g. "link"), not the raw tag name — a plain <a> element's
+  // tagName is literally "a", which reads as the indefinite article ("a
+  // 'About'" looks like a typo, not a description) rather than what it
+  // actually is (a link named "About").
+  var roleLabel = impliedRole || tag;
+  var description = label ? roleLabel + " \\"" + label.replace(/"/g, "'") + "\\"" : roleLabel;
 
   function cssPath(node) {
     var parts = [];
@@ -484,9 +523,13 @@ export function upgradeWithAxRoleName(info: ElementInfo, axRoleName: AxRoleName 
   if (!axRoleName) return info;
   if (info.description === "the page" || info.description === "a password field") return info;
   if (info.locator?.strategy === "testId") return info;
-  const tag = axRoleName.tag ?? info.description.match(/^(\w+)/)?.[1] ?? "element";
+  // The accessibility tree's own role (e.g. "link", "button") — not
+  // axRoleName.tag, which is the raw DOM tag name ("a" for every anchor)
+  // and reads like a stray indefinite article in front of the name rather
+  // than a description ("a 'About'" instead of "link 'About'").
+  const roleLabel = axRoleName.role || axRoleName.tag || info.description.match(/^(\w+)/)?.[1] || "element";
   return {
-    description: `${tag} "${axRoleName.name}"`,
+    description: `${roleLabel} "${axRoleName.name}"`,
     locator: {
       strategy: "role",
       role: axRoleName.role,
@@ -854,46 +897,57 @@ export async function launchRunBrowser(job: RunJob): Promise<RunSession | null> 
     browser.close().catch(() => {});
   });
 
-  // Playwright can only write videos/traces to a real filesystem path —
-  // this is a transient scratch location; everything in it gets uploaded
-  // to MinIO and discarded (see finalizeRunSession below).
-  const scratchDir = runScratchDir(job.record.id);
+  // Everything below can throw (video recording setup, CDP session/domain
+  // enablement, etc.) — without this try/catch, a failure here would leak
+  // `browser` forever: every caller (runTask, replayTask, variantTask,
+  // agentTask, crawlTask/validateTask) only ever gets a session object back
+  // on success, so none of them have anything to close if we never
+  // returned one.
+  try {
+    // Playwright can only write videos/traces to a real filesystem path —
+    // this is a transient scratch location; everything in it gets uploaded
+    // to MinIO and discarded (see finalizeRunSession below).
+    const scratchDir = runScratchDir(job.record.id);
 
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    recordVideo: { dir: scratchDir, size: { width: 1280, height: 800 } },
-  });
-  const page = await context.newPage();
-  // Re-injected by Playwright on every navigation — draws the cursor/click
-  // overlay that makes manual input (and, for a replay, auto-driven
-  // clicks) visible in both the live view and the recorded video.
-  await page.addInitScript({ content: CURSOR_OVERLAY_SCRIPT });
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      recordVideo: { dir: scratchDir, size: { width: 1280, height: 800 } },
+    });
+    const page = await context.newPage();
+    // Re-injected by Playwright on every navigation — draws the cursor/click
+    // overlay that makes manual input (and, for a replay, auto-driven
+    // clicks) visible in both the live view and the recorded video.
+    await page.addInitScript({ content: CURSOR_OVERLAY_SCRIPT });
 
-  await context.tracing.start({ screenshots: true, snapshots: true });
+    await context.tracing.start({ screenshots: true, snapshots: true });
 
-  const cdp = await context.newCDPSession(page);
-  // Needed by the AX-tree-based locator lookups below (DOM.getNodeForLocation,
-  // Accessibility.getPartialAXTree) — captured steps' role/name now come from
-  // Chrome's real accessibility tree, not just the in-page DOM heuristic.
-  await cdp.send("DOM.enable");
-  await cdp.send("Accessibility.enable");
-  await cdp.send("Page.startScreencast", {
-    format: "jpeg",
-    quality: 60,
-    maxWidth: 1280,
-    maxHeight: 800,
-    everyNthFrame: 1,
-  });
-  cdp.on("Page.screencastFrame", async (frame) => {
-    job.emitFrame(frame.data);
-    try {
-      await cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId });
-    } catch {
-      // session may already be closed
-    }
-  });
+    const cdp = await context.newCDPSession(page);
+    // Needed by the AX-tree-based locator lookups below (DOM.getNodeForLocation,
+    // Accessibility.getPartialAXTree) — captured steps' role/name now come from
+    // Chrome's real accessibility tree, not just the in-page DOM heuristic.
+    await cdp.send("DOM.enable");
+    await cdp.send("Accessibility.enable");
+    await cdp.send("Page.startScreencast", {
+      format: "jpeg",
+      quality: 60,
+      maxWidth: 1280,
+      maxHeight: 800,
+      everyNthFrame: 1,
+    });
+    cdp.on("Page.screencastFrame", async (frame) => {
+      job.emitFrame(frame.data);
+      try {
+        await cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId });
+      } catch {
+        // session may already be closed
+      }
+    });
 
-  return { browser, context, page, cdp, scratchDir, projectId, skillId };
+    return { browser, context, page, cdp, scratchDir, projectId, skillId };
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
 }
 
 // The other half of launchRunBrowser — terminal-status persistence,
@@ -981,15 +1035,25 @@ export interface ExplorationSession {
 // watch live. Callers must close `browser` themselves (a `finally`).
 export async function launchExplorationBrowser(startUrl: string): Promise<ExplorationSession> {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const page = await context.newPage();
-  const cdp = await context.newCDPSession(page);
-  // listInteractiveElements (src/server/variationDiscovery.ts) now walks the
-  // real accessibility tree to enumerate alternatives.
-  await cdp.send("DOM.enable");
-  await cdp.send("Accessibility.enable");
-  await page.goto(startUrl, { waitUntil: "domcontentloaded" });
-  return { browser, context, page, cdp };
+  // Everything below can throw (a slow/unreachable startUrl most commonly,
+  // via page.goto) — without this try/catch, a failure here would leak
+  // `browser` forever: the caller only ever gets a session object back on
+  // success, so its own cleanup (`session?.browser.close()`) has nothing to
+  // close when we never returned one.
+  try {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    const cdp = await context.newCDPSession(page);
+    // listInteractiveElements (src/server/variationDiscovery.ts) now walks the
+    // real accessibility tree to enumerate alternatives.
+    await cdp.send("DOM.enable");
+    await cdp.send("Accessibility.enable");
+    await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+    return { browser, context, page, cdp };
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
 }
 
 export async function runTask(job: RunJob) {

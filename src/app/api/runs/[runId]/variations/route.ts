@@ -1,5 +1,5 @@
 import { getRun, createRun } from "@/server/runManager";
-import { getRunFromDb, getAlternativeSuggestions, listVariantRuns } from "@/server/runs";
+import { getRunFromDb, getAlternativePlans, listVariantRuns } from "@/server/runs";
 import { enqueueRun } from "@/server/queue";
 import { getOptionalSession } from "@/server/dal";
 import { prisma } from "@/server/db";
@@ -27,7 +27,7 @@ export async function POST(
 
   const body = await request.json().catch(() => null);
   const stepIndex = Number(body?.stepIndex);
-  const candidateIndex = Number(body?.candidateIndex);
+  const planIndex = Number(body?.planIndex);
   if (!Number.isInteger(stepIndex) || stepIndex < 0 || stepIndex >= record.steps.length) {
     return Response.json({ error: "Invalid step index" }, { status: 400 });
   }
@@ -40,14 +40,15 @@ export async function POST(
     );
   }
 
-  // The specific target was already decided by the alternative-suggestion
-  // pipeline (src/server/alternativesAgent.ts) — this route just looks up
-  // the candidate the user picked from that cached list and hands it
-  // straight to the new run. No rediscovery happens here.
-  const cached = await getAlternativeSuggestions(runId, stepIndex);
-  const chosen = cached?.candidates[candidateIndex];
-  if (!chosen) {
-    return Response.json({ error: "That suggestion no longer exists — try finding alternatives again" }, { status: 400 });
+  // The specific plan (one or more hops) was already decided by the
+  // alternative-plan pipeline (src/server/alternativesAgent.ts) — this
+  // route just looks up the plan the user picked from that cached list and
+  // hands its full hop sequence straight to the new run. No rediscovery
+  // happens here.
+  const cached = await getAlternativePlans(runId, stepIndex);
+  const chosen = cached?.plans[planIndex];
+  if (!chosen || chosen.steps.length === 0) {
+    return Response.json({ error: "That plan no longer exists — try planning alternatives again" }, { status: 400 });
   }
 
   const promptRow = await prisma.prompt.findUnique({
@@ -67,8 +68,9 @@ export async function POST(
     sourceRunId: runId,
     variantOfStepIndex: stepIndex,
     variantIndex: existing.length,
-    variantTargetLocator: chosen.locator,
-    variantLabel: chosen.description,
+    variantTargetLocator: chosen.steps[0].locator,
+    variantPlanSteps: chosen.steps.map((s) => s.locator),
+    variantLabel: chosen.steps.map((s) => s.description).join(" → "),
   });
   await enqueueRun(variantJob.record.id);
 

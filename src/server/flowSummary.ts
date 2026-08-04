@@ -128,6 +128,8 @@ interface StepCaption {
 
 const NO_SCREENSHOT_REASONING =
   "No screenshot was captured for this step — captioned from the recorded step type only.";
+const PASSIVE_MARKER_REASONING =
+  "This step just marks when the session began/ended, not a user action — its screenshot was never a click/scroll/type to interpret, so this uses the recorded description as-is rather than asking a vision model to describe an action that didn't happen.";
 
 // Lenient "Label: text" parsing, same philosophy as parseSynthesisResponse
 // below — a small local model's instruction-following is weaker than a
@@ -159,6 +161,18 @@ function describeLocatorForPrompt(step: StepResult): string | null {
 
 async function captionStep(runId: string, step: StepResult): Promise<StepCaption> {
   const fallback = step.description ?? step.type;
+  // manual-start/manual-finish aren't a user action to interpret — they're
+  // passive markers for "the session began/ended on this page." Handing
+  // their screenshot to a vision model anyway invites exactly the failure
+  // mode this guard prevents: a manual-finish screenshot that happens to
+  // show a prominent "Apply" button gets narrated as "User clicked on the
+  // Apply button" — a real click that never happened, duplicating the one
+  // that already occurred (and was correctly captioned) at its own earlier
+  // step. Their own recorded description is already accurate; asking a
+  // model to embellish it only adds a chance of it inventing an action.
+  if (step.type === "manual-start" || step.type === "manual-finish") {
+    return { index: step.index, caption: fallback, reasoning: PASSIVE_MARKER_REASONING };
+  }
   if (!step.screenshot) {
     return { index: step.index, caption: fallback, reasoning: NO_SCREENSHOT_REASONING };
   }

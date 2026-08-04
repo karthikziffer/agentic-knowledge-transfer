@@ -4,8 +4,9 @@ import {
   launchRunBrowser,
   finalizeRunSession,
   screenshotStep,
-  moveCursorOverlay,
+  glideCursorTo,
   triggerClickRipple,
+  settleAfterAction,
 } from "./automation";
 import { listInteractiveElements, type AlternativeTarget } from "./variationDiscovery";
 import { clickResilient } from "./variation";
@@ -13,7 +14,7 @@ import { resolveLocator } from "./locatorReplay";
 import { persistRun } from "./runs";
 import { runCypher, ensureGraphSchema } from "./graphDb";
 import { embedText } from "./embeddings";
-import type { ElementLocator } from "./types";
+import type { CrawlDepthGoal, ElementLocator } from "./types";
 
 // The resolved crawl-safety question: only ever auto-click nav links and
 // tabs to discover a real destination — everything else (buttons, form
@@ -33,10 +34,112 @@ export const AUTO_FOLLOW_ROLES = new Set(["link", "tab"]);
 const MAX_DEPTH = 2;
 const MAX_PAGES = 10;
 
+// Higher ceiling used only when the crawl is goal-directed (RunRecord.
+// crawlDepthGoals set) — a goal like "5 distinct triple-step pages" can
+// genuinely need to visit (and discard as near-duplicates) more pages than
+// the flat MAX_PAGES budget allows, but this still bounds the worst case
+// (a goal a real site can't satisfy) so the crawl can't run away forever.
+const GOAL_DIRECTED_MAX_PAGES = 50;
+
+// How similar (cosine, on embeddings of each page's title) two pages at the
+// same depth need to be before the second one is treated as a near-
+// duplicate of the first rather than a genuinely distinct alternative — see
+// countTowardDepthGoal below. High on purpose: this only ever discards a
+// page from *counting toward a goal*, never from the graph itself, so a
+// false "distinct" costs nothing but a false "duplicate" would silently
+// undercount a real alternative.
+const DISTINCT_PAGE_SIMILARITY_THRESHOLD = 0.92;
+
 // Shared destination for every action the crawler chooses not to follow —
 // keeps the graph schema simple (every :ACTION edge has two real endpoints)
 // instead of leaving relationships dangling.
 const UNEXPLORED_URL = "__unexplored__";
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Tracks, per depth that has a goal, how many genuinely distinct pages have
+// been counted so far and their embeddings (to compare the next candidate
+// against). A page counts once it's dissimilar enough from every page
+// already counted at that same depth — near-duplicates (e.g. paginated
+// listing pages, near-identical product variants) still get cataloged as
+// normal graph nodes by the caller, they just don't move a goal forward.
+class DepthGoalTracker {
+  private readonly goals: Map<number, number>;
+  private readonly counted = new Map<number, number>();
+  private readonly embeddings = new Map<number, number[][]>();
+
+  constructor(goals: CrawlDepthGoal[]) {
+    this.goals = new Map(goals.map((g) => [g.depth, g.goal]));
+  }
+
+  get active(): boolean {
+    return this.goals.size > 0;
+  }
+
+  get maxDepth(): number {
+    return this.goals.size ? Math.max(...this.goals.keys()) : 0;
+  }
+
+  hasGoalAt(depth: number): boolean {
+    return this.goals.has(depth);
+  }
+
+  // Embeds the page's title and compares it against every page already
+  // counted at this depth — best-effort: an embedding failure just means
+  // this page doesn't count toward the goal (logged, not thrown), same
+  // "one bad page shouldn't kill the whole crawl" philosophy as
+  // recordEmbedFailure below.
+  async count(depth: number, url: string, title: string): Promise<void> {
+    const goal = this.goals.get(depth);
+    if (goal === undefined) return;
+    if ((this.counted.get(depth) ?? 0) >= goal) return;
+    try {
+      const embedding = await embedText(title || url);
+      const existing = this.embeddings.get(depth) ?? [];
+      const isDuplicate = existing.some(
+        (e) => cosineSimilarity(e, embedding) >= DISTINCT_PAGE_SIMILARITY_THRESHOLD,
+      );
+      if (isDuplicate) return;
+      existing.push(embedding);
+      this.embeddings.set(depth, existing);
+      this.counted.set(depth, (this.counted.get(depth) ?? 0) + 1);
+    } catch (err) {
+      console.error(`[actionGraph] failed computing depth-goal embedding for ${url}`, err);
+    }
+  }
+
+  allMet(): boolean {
+    if (!this.active) return false;
+    for (const [depth, goal] of this.goals) {
+      if ((this.counted.get(depth) ?? 0) < goal) return false;
+    }
+    return true;
+  }
+
+  // One line per specified depth, e.g. "depth 1 ✓ 2/2, depth 2 ✗ 3/4" — used
+  // in the crawl's finish step so a shortfall is visible without digging
+  // into logs.
+  summary(): string {
+    return [...this.goals.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([depth, goal]) => {
+        const got = this.counted.get(depth) ?? 0;
+        return `depth ${depth} ${got >= goal ? "✓" : "✗"} ${got}/${goal}`;
+      })
+      .join(", ");
+  }
+}
 
 // How long one action gets, start to finish (navigate + resolve + click),
 // before validateTask gives up on it and moves to the next one. Without
@@ -226,7 +329,17 @@ export async function crawlTask(job: RunJob): Promise<void> {
     // an unrelated domain.
     const startOrigin = new URL(job.record.startUrl).origin;
 
-    while (queue.length > 0 && visited.size < MAX_PAGES) {
+    // Goal-directed mode (RunRecord.crawlDepthGoals, set via the depth-goal
+    // editor in SkillActionGraph.tsx) swaps the flat MAX_DEPTH/MAX_PAGES
+    // budget for "keep going until every requested depth has enough
+    // genuinely distinct pages" — see DepthGoalTracker above. Absent goals,
+    // this is a no-op and every constant below falls back to the original
+    // flat-budget values, unchanged from before this feature existed.
+    const depthGoals = new DepthGoalTracker(job.record.crawlDepthGoals ?? []);
+    const effectiveMaxDepth = depthGoals.active ? depthGoals.maxDepth : MAX_DEPTH;
+    const pageBudget = depthGoals.active ? GOAL_DIRECTED_MAX_PAGES : MAX_PAGES;
+
+    while (queue.length > 0 && visited.size < pageBudget && !depthGoals.allMet()) {
       if (job.stopRequested) break;
       const next = queue.shift();
       if (!next) break;
@@ -253,11 +366,14 @@ export async function crawlTask(job: RunJob): Promise<void> {
       await persistRun(job.record).catch(() => {});
 
       await upsertPageState(skillId, graphRunId, currentUrl, title || currentUrl, step.screenshot, job.record.id);
+      if (depth > 0 && depthGoals.hasGoalAt(depth)) {
+        await depthGoals.count(depth, currentUrl, title);
+      }
 
       const elements = await listInteractiveElements(cdp);
       for (const el of elements) {
         if (job.stopRequested) break;
-        let canAutoFollow = depth < MAX_DEPTH && AUTO_FOLLOW_ROLES.has(el.role);
+        let canAutoFollow = depth < effectiveMaxDepth && AUTO_FOLLOW_ROLES.has(el.role);
         const locator = canAutoFollow ? resolveLocator(page, el.locator) : null;
 
         // For a plain anchor, the href alone already tells us the
@@ -298,11 +414,12 @@ export async function crawlTask(job: RunJob): Promise<void> {
           if (box) {
             const x = box.x + box.width / 2;
             const y = box.y + box.height / 2;
-            moveCursorOverlay(cdp, x, y);
+            await glideCursorTo(page, cdp, x, y);
             triggerClickRipple(cdp, x, y);
           }
           await clickResilient(locator, 5000);
           await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+          await settleAfterAction(page);
           const destUrl = page.url();
           // The click itself already succeeded (real navigation happened)
           // even if recording it fails — still worth queuing the
@@ -344,13 +461,29 @@ export async function crawlTask(job: RunJob): Promise<void> {
 
     {
       const pagesExplored = visited.size;
+      // Not thrown as a run-level failure — a shortfall just means the site
+      // didn't have enough genuinely distinct pages at some depth, which is
+      // real, useful information about the site, not a crash. Flagged on
+      // this step instead (same red/error step styling embedFailures
+      // already gets in the live view's step list) so it's visible without
+      // the whole crawl reading as "failed." SkillActionGraph.tsx checks
+      // this finish step specifically to show a distinct "goals not fully
+      // met" toast, separate from the run-level error toast.
+      const goalsShort = depthGoals.active && !depthGoals.allMet();
+      const goalsLine = depthGoals.active ? ` — goals: ${depthGoals.summary()}` : "";
       const finishStep = job.addStep({
         type: "manual-finish",
         description:
           `Crawl finished — ${pagesExplored} page${pagesExplored === 1 ? "" : "s"} explored` +
+          goalsLine +
           (embedFailures > 0 ? `, ${embedFailures} action${embedFailures === 1 ? "" : "s"} failed to record` : ""),
-        status: embedFailures > 0 ? "error" : "done",
-        error: embedFailures > 0 ? `${embedFailures} action(s) failed to record — see server logs` : undefined,
+        status: embedFailures > 0 || goalsShort ? "error" : "done",
+        error:
+          embedFailures > 0
+            ? `${embedFailures} action(s) failed to record — see server logs`
+            : goalsShort
+              ? `Not every depth goal was met — ${depthGoals.summary()}`
+              : undefined,
         startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
         url: page.url(),
@@ -454,10 +587,11 @@ export async function validateTask(job: RunJob): Promise<void> {
 
             const box = await resolved.boundingBox().catch(() => null);
             if (box) {
-              moveCursorOverlay(cdp, box.x + box.width / 2, box.y + box.height / 2);
+              await glideCursorTo(page, cdp, box.x + box.width / 2, box.y + box.height / 2);
               triggerClickRipple(cdp, box.x + box.width / 2, box.y + box.height / 2);
             }
             await clickResilient(resolved, 5000);
+            await settleAfterAction(page);
           })(),
           new Promise<never>((_, reject) =>
             setTimeout(

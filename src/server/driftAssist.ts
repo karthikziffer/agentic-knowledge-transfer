@@ -56,6 +56,16 @@ interface DescribedCandidate {
   description: string;
   locator: ElementLocator;
   box: { x: number; y: number; width: number; height: number };
+  // From locatorReplay.ts's position check — how far this candidate's
+  // current center is from where the original click landed. Undefined if no
+  // recorded click point existed at all; that's different from a large
+  // number, so it's kept absent rather than coerced to something like -1.
+  positionDistance?: number;
+  // From locatorReplay.ts's content-similarity check — cosine similarity
+  // (0-1) between embeddings of this candidate's current sibling text and
+  // the recorded element's sibling text. Undefined if there was nothing on
+  // either side to embed and compare.
+  contentSimilarity?: number;
 }
 
 // Reuses the exact same in-page description/locate logic recording uses
@@ -64,9 +74,19 @@ interface DescribedCandidate {
 // — even when the winning `strategy` is the same weak text/role match every
 // other candidate shares, which is exactly why they collided in the first
 // place.
-async function describeCandidates(candidates: Locator[]): Promise<DescribedCandidate[]> {
+// `positionDistances`/`contentSimilarities`, if given, are index-aligned to
+// `candidates` (as produced by locatorReplay.ts's pickByRecordedPosition/
+// pickByContentSimilarity) — carried through by original index since
+// candidates without a usable bounding box/selector get skipped here, which
+// would otherwise desync a parallel array.
+async function describeCandidates(
+  candidates: Locator[],
+  positionDistances?: (number | null)[],
+  contentSimilarities?: (number | null)[],
+): Promise<DescribedCandidate[]> {
   const described: DescribedCandidate[] = [];
-  for (const candidate of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
     const box = await candidate.boundingBox().catch(() => null);
     if (!box) continue;
     const result = (await candidate
@@ -74,31 +94,45 @@ async function describeCandidates(candidates: Locator[]): Promise<DescribedCandi
       .catch(() => null)) as { description: string; locator: ElementLocator | null } | null;
     const cssSelector = result?.locator?.cssSelector;
     if (!cssSelector) continue;
+    const positionDistance = positionDistances?.[i];
+    const contentSimilarity = contentSimilarities?.[i];
     described.push({
       index: described.length,
       description: result?.description || `candidate ${described.length + 1}`,
       locator: { strategy: "css", value: cssSelector, cssSelector },
       box,
+      positionDistance: positionDistance ?? undefined,
+      contentSimilarity: contentSimilarity ?? undefined,
     });
   }
   return described;
 }
 
 // Draws a numbered red outline over each candidate directly on the live
-// page, screenshots it, then removes the overlay — same "position: fixed,
-// viewport-pixel coordinates" convention as automation.ts's cursor overlay.
+// page, screenshots it, then removes the overlay. Document-relative
+// (`position: absolute` + the scroll offset at draw time), not the
+// viewport-relative "fixed" positioning this used before — combined with
+// `fullPage: true` below, that's what makes candidates that are far apart
+// vertically (a top-nav link and a footer link sharing the same name, say)
+// both actually show up in the one screenshot the vision model sees. A
+// plain viewport screenshot can only ever contain whichever single
+// candidate happens to be scrolled into view — the other would be drawn
+// completely outside the captured frame, making a real visual comparison
+// between them impossible regardless of how good the model is.
 async function screenshotWithHighlights(page: Page, candidates: DescribedCandidate[]): Promise<Buffer> {
   const items = candidates.map((c) => ({ index: c.index, box: c.box }));
   await page.evaluate((boxes: { index: number; box: DescribedCandidate["box"] }[]) => {
     const root = document.createElement("div");
     root.id = "__sb_drift_overlay";
-    Object.assign(root.style, { position: "fixed", inset: "0", pointerEvents: "none", zIndex: "2147483647" });
+    Object.assign(root.style, { position: "absolute", left: "0", top: "0", pointerEvents: "none", zIndex: "2147483647" });
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
     for (const item of boxes) {
       const box = document.createElement("div");
       Object.assign(box.style, {
         position: "absolute",
-        left: `${item.box.x}px`,
-        top: `${item.box.y}px`,
+        left: `${item.box.x + scrollX}px`,
+        top: `${item.box.y + scrollY}px`,
         width: `${item.box.width}px`,
         height: `${item.box.height}px`,
         border: "3px solid #f43f5e",
@@ -122,7 +156,7 @@ async function screenshotWithHighlights(page: Page, candidates: DescribedCandida
     document.documentElement.appendChild(root);
   }, items);
   try {
-    return await page.screenshot({ type: "jpeg", quality: 70 });
+    return await page.screenshot({ type: "jpeg", quality: 70, fullPage: true });
   } finally {
     await page.evaluate(() => document.getElementById("__sb_drift_overlay")?.remove()).catch(() => {});
   }
@@ -160,6 +194,8 @@ async function suggestFromCandidates(params: {
   recordedScreenshotFile: string;
   targetDescription: string;
   candidates: Locator[];
+  positionDistances?: (number | null)[];
+  contentSimilarities?: (number | null)[];
   context: SemanticContext;
 }): Promise<DriftSuggestion | undefined> {
   const {
@@ -170,13 +206,15 @@ async function suggestFromCandidates(params: {
     recordedScreenshotFile,
     targetDescription,
     candidates,
+    positionDistances,
+    contentSimilarities,
     context,
   } = params;
   const logCtx = { runId, sourceRunId, sourceStepIndex };
 
   let described: DescribedCandidate[];
   try {
-    described = await describeCandidates(candidates);
+    described = await describeCandidates(candidates, positionDistances, contentSimilarities);
   } catch (err) {
     console.error(`${LOG_PREFIX} failed describing candidates`, logCtx, err);
     return undefined;
@@ -215,7 +253,20 @@ async function suggestFromCandidates(params: {
       return undefined;
     });
 
-  const candidatesList = described.map((c) => `${c.index}. ${c.description}`).join("\n");
+  // Surfaces locatorReplay.ts's own position and content-similarity checks
+  // as numeric hints inside the same prompt, instead of them being separate,
+  // invisible-to-the-model gates — a candidate too far/dissimilar to trust
+  // on either signal alone can still be the right one; the model now gets
+  // to weigh both alongside what it sees in the screenshots rather than
+  // never seeing them at all.
+  const candidatesList = described
+    .map((c) => {
+      const notes: string[] = [];
+      if (c.positionDistance !== undefined) notes.push(`${Math.round(c.positionDistance)}px from the recorded click position`);
+      if (c.contentSimilarity !== undefined) notes.push(`${Math.round(c.contentSimilarity * 100)}% similar surrounding text`);
+      return `${c.index}. ${c.description}${notes.length ? ` (${notes.join(", ")})` : ""}`;
+    })
+    .join("\n");
 
   let responseText: string;
   try {
@@ -282,6 +333,26 @@ async function suggestFromCandidates(params: {
 // uses, so results are already visible, real, and never invented), scored
 // against the flow's narrative and this step's caption rather than any
 // resemblance to the original locator's own strategy.
+// variationDiscovery.ts's own MAX_ELEMENTS (40) is sized for its other
+// callers (the alternatives pipeline, the site crawl); this fallback sends
+// its elements straight into an Ollama vision prompt on top of a screenshot,
+// and 40 fully-described elements plus a full-page image was enough to blow
+// past a 4096-token context window in practice (a real page tripped a
+// 5256-token request). Re-capped smaller here rather than lowering the
+// shared constant, since those other callers aren't context-constrained the
+// same way.
+const MAX_WHOLE_PAGE_ELEMENTS = 20;
+const MAX_ELEMENT_DESCRIPTION_CHARS = 80;
+// Bounds the screenshot to a couple of viewport heights instead of the
+// page's full scroll height — the biggest single contributor to the
+// over-budget request above, since a vision model's image-token cost scales
+// with pixel area and a long marketing/content page can run many multiples
+// of one viewport tall. Most "what to click next" decisions live near the
+// top of the page anyway; this trades away matching on elements far below
+// the fold in exchange for the fallback actually returning a result instead
+// of failing outright.
+const MAX_SCREENSHOT_VIEWPORTS = 2;
+
 async function suggestFromWholePage(params: {
   page: Page;
   cdp: CDPSession;
@@ -295,19 +366,33 @@ async function suggestFromWholePage(params: {
   const logCtx = { runId, sourceRunId, sourceStepIndex };
 
   try {
-    const elements = await listInteractiveElements(cdp);
-    if (elements.length === 0) {
+    const allElements = await listInteractiveElements(cdp);
+    if (allElements.length === 0) {
       console.warn(`${LOG_PREFIX} whole-page fallback found no interactive elements`, logCtx);
       return undefined;
     }
+    const elements = allElements.slice(0, MAX_WHOLE_PAGE_ELEMENTS);
 
-    const screenshot = await page.screenshot({ type: "jpeg", quality: 70 }).catch(() => null);
+    const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
+    const scrollHeight = await page
+      .evaluate(() => document.documentElement.scrollHeight)
+      .catch(() => viewport.height);
+    const clipHeight = Math.min(scrollHeight, viewport.height * MAX_SCREENSHOT_VIEWPORTS);
+    const screenshot = await page
+      .screenshot({
+        type: "jpeg",
+        quality: 70,
+        clip: { x: 0, y: 0, width: viewport.width, height: clipHeight },
+      })
+      .catch(() => null);
     if (!screenshot) {
       console.warn(`${LOG_PREFIX} whole-page fallback couldn't capture a screenshot`, logCtx);
       return undefined;
     }
 
-    const elementsList = elements.map((e, i) => `${i}. ${e.description}`).join("\n");
+    const elementsList = elements
+      .map((e, i) => `${i}. ${e.description.slice(0, MAX_ELEMENT_DESCRIPTION_CHARS)}`)
+      .join("\n");
     const response = await invokeChatModel([
       new SystemMessage(getPrompt("driftAssist.suggestWholePage.system")),
       new HumanMessage({
@@ -373,9 +458,21 @@ export async function suggestDriftCandidate(params: {
   recordedScreenshotFile: string;
   targetDescription: string;
   candidates: Locator[];
+  positionDistances?: (number | null)[];
+  contentSimilarities?: (number | null)[];
 }): Promise<DriftSuggestion | undefined> {
-  const { page, cdp, runId, sourceStepIndex, sourceRunId, recordedScreenshotFile, targetDescription, candidates } =
-    params;
+  const {
+    page,
+    cdp,
+    runId,
+    sourceStepIndex,
+    sourceRunId,
+    recordedScreenshotFile,
+    targetDescription,
+    candidates,
+    positionDistances,
+    contentSimilarities,
+  } = params;
 
   const summary = await getRunSummary(sourceRunId).catch(() => null);
   const context: SemanticContext = {
@@ -391,6 +488,8 @@ export async function suggestDriftCandidate(params: {
     recordedScreenshotFile,
     targetDescription,
     candidates,
+    positionDistances,
+    contentSimilarities,
     context,
   });
   if (fromCandidates) return fromCandidates;

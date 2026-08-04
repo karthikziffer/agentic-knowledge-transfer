@@ -4,15 +4,13 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Modal from "@/components/Modal";
 import Spinner from "@/components/Spinner";
-import LiveRunView from "@/components/LiveRunView";
 import { useToast } from "@/components/Toast";
 
-type Step = "project" | "skill" | "run";
+type Step = "project" | "skill";
 
 const STEPS: { key: Step; label: string }[] = [
   { key: "project", label: "Project" },
   { key: "skill", label: "Skill" },
-  { key: "run", label: "Run" },
 ];
 
 export default function CreateProjectWizard() {
@@ -29,9 +27,6 @@ export default function CreateProjectWizard() {
 
   const [skillName, setSkillName] = useState("");
   const [startUrl, setStartUrl] = useState("");
-  const [promptId, setPromptId] = useState<string | null>(null);
-
-  const [runId, setRunId] = useState<string | null>(null);
 
   function openWizard() {
     setStep("project");
@@ -42,16 +37,14 @@ export default function CreateProjectWizard() {
     setProjectId(null);
     setSkillName("");
     setStartUrl("");
-    setPromptId(null);
-    setRunId(null);
     setOpen(true);
   }
 
   function closeWizard() {
     setOpen(false);
-    // A project (and maybe a skill/run) may have been created even if the
-    // user bails before the last step — refresh so the dashboard reflects
-    // it either way.
+    // A project (and maybe a skill) may have been created even if the user
+    // bails before the last step — refresh so the dashboard reflects it
+    // either way.
     router.refresh();
   }
 
@@ -76,42 +69,49 @@ export default function CreateProjectWizard() {
     setStep("skill");
   }
 
+  // Creates the skill, then immediately starts its session and navigates
+  // straight to the real run page — no separate "start session" step or
+  // in-modal live view. The modal's job is just collecting the two forms;
+  // the actual session belongs on its own full page, already running by
+  // the time you land on it.
   async function handleCreateSkill(e: React.FormEvent) {
     e.preventDefault();
     if (!projectId) return;
     setBusy(true);
     setError(null);
-    const res = await fetch(`/api/projects/${projectId}/skills`, {
+    const skillRes = await fetch(`/api/projects/${projectId}/skills`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: skillName, startUrl }),
     });
-    const body = await res.json();
-    setBusy(false);
-    if (!res.ok) {
-      const message = body.error ?? "Failed to create skill";
+    const skillBody = await skillRes.json();
+    if (!skillRes.ok) {
+      setBusy(false);
+      const message = skillBody.error ?? "Failed to create skill";
       setError(message);
       toast.error(message);
       return;
     }
-    setPromptId(body.skill.prompts[0].id);
-    setStep("run");
-  }
+    const skillId = skillBody.skill.id as string;
+    const promptId = skillBody.skill.prompts[0].id as string;
 
-  async function handleStartRun() {
-    if (!promptId) return;
-    setBusy(true);
-    setError(null);
-    const res = await fetch(`/api/prompts/${promptId}/runs`, { method: "POST" });
-    const body = await res.json();
+    const runRes = await fetch(`/api/prompts/${promptId}/runs`, { method: "POST" });
+    const runBody = await runRes.json();
     setBusy(false);
-    if (!res.ok) {
-      const message = body.error ?? "Failed to start run";
-      setError(message);
+    if (!runRes.ok) {
+      // The skill itself was created fine — only the auto-start failed —
+      // so send them to the skill page rather than stranding them in the
+      // modal with nothing left to retry in here.
+      const message = runBody.error ?? "Skill created, but failed to start a session";
       toast.error(message);
+      setOpen(false);
+      router.push(`/projects/${projectId}/skills/${skillId}`);
       return;
     }
-    setRunId(body.runId);
+    setOpen(false);
+    router.push(
+      `/projects/${projectId}/skills/${skillId}/prompts/${promptId}/runs/${runBody.runId}`,
+    );
   }
 
   return (
@@ -207,40 +207,9 @@ export default function CreateProjectWizard() {
               {error && <p className="text-xs text-error">{error}</p>}
               <button type="submit" disabled={busy} className="btn btn-primary self-start">
                 {busy && <Spinner />}
-                {busy ? "Creating…" : "Next: start a run"}
+                {busy ? "Starting session…" : "Create & start session"}
               </button>
             </form>
-          )}
-
-          {step === "run" && (
-            <div className="flex flex-col gap-3">
-              {!runId ? (
-                <>
-                  <p className="text-[13px] text-ink-muted">
-                    <span className="font-medium text-ink">{skillName}</span> is ready inside{" "}
-                    <span className="font-medium text-ink">{projectName}</span>. Start a run to watch it
-                    live right here.
-                  </p>
-                  {error && <p className="text-xs text-error">{error}</p>}
-                  <div className="flex gap-2">
-                    <button type="button" onClick={handleStartRun} disabled={busy} className="btn btn-primary">
-                      {busy && <Spinner />}
-                      {busy ? "Starting…" : "Start session"}
-                    </button>
-                    <button type="button" onClick={closeWizard} className="btn btn-secondary">
-                      Skip for now
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <LiveRunView runId={runId} />
-                  <button type="button" onClick={closeWizard} className="btn btn-secondary self-start">
-                    Done
-                  </button>
-                </>
-              )}
-            </div>
           )}
         </div>
       </Modal>

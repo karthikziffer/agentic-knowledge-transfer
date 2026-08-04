@@ -1,11 +1,12 @@
 import { Queue, Worker } from "bullmq";
 import { redisConnectionOptions } from "./redisConnection";
 import { publish } from "./redisPubSub";
-import { generateAlternativeSuggestions } from "./alternativesAgent";
+import { generateAlternativePlans } from "./alternativesAgent";
+import type { CrawlDepthGoal } from "./types";
 
 // Separate from queue.ts's "runs" queue on purpose: a RunJob is a live,
 // in-memory EventEmitter tied to a Chromium session and the WebSocket live
-// view — none of which crosses a process boundary. Alternative-suggestion
+// view — none of which crosses a process boundary. Alternative-plan
 // generation has no live view and no human-in-the-loop control, so it's the
 // one job type that can actually run in a wholly separate worker process
 // (see worker.ts) — decoupling it from the web server means a slow/hanging
@@ -16,6 +17,7 @@ const QUEUE_NAME = "alternatives";
 interface AlternativesJobData {
   runId: string;
   stepIndex: number;
+  depthGoals: CrawlDepthGoal[];
 }
 
 let queue: Queue<AlternativesJobData> | undefined;
@@ -37,11 +39,15 @@ export function alternativesProgressChannel(runId: string, stepIndex: number): s
 // attaches to the same job instead of launching a second browser, and
 // "Regenerate" after a previous run completed (and was removed by
 // removeOnComplete) always starts fresh.
-export async function enqueueAlternativesJob(runId: string, stepIndex: number): Promise<string> {
+export async function enqueueAlternativesJob(
+  runId: string,
+  stepIndex: number,
+  depthGoals: CrawlDepthGoal[],
+): Promise<string> {
   const jobId = `${runId}-${stepIndex}`;
   await getQueue().add(
     "suggest",
-    { runId, stepIndex },
+    { runId, stepIndex, depthGoals },
     { jobId, attempts: 1, removeOnComplete: true, removeOnFail: true },
   );
   return jobId;
@@ -54,18 +60,18 @@ export function startAlternativesWorker(concurrency: number) {
   worker = new Worker<AlternativesJobData>(
     QUEUE_NAME,
     async (bullJob) => {
-      const { runId, stepIndex } = bullJob.data;
+      const { runId, stepIndex, depthGoals } = bullJob.data;
       const channel = alternativesProgressChannel(runId, stepIndex);
       try {
-        const result = await generateAlternativeSuggestions(runId, stepIndex, (progress) => {
+        const result = await generateAlternativePlans(runId, stepIndex, depthGoals, (progress) => {
           publish(channel, { type: "progress", progress }).catch((err) => {
             console.error("[alternativesQueue] failed publishing progress", { runId, stepIndex }, err);
           });
         });
         await publish(channel, {
           type: "done",
-          suggestions: result.suggestions,
-          explorationScreenshot: result.explorationScreenshot,
+          plans: result.plans,
+          rootScreenshot: result.rootScreenshot,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

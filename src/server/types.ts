@@ -94,11 +94,24 @@ export interface StepResult {
   // re-solving the same drift every single time. Additive, never replaces
   // `locator` — the original recording stays inspectable.
   healedLocator?: HealedLocatorRecord;
+  // Set on an "agent-step" step (src/server/agent.ts's agentTask) — the full
+  // decision trail behind that one planned step, not just the one-line
+  // pass/fail description: every candidate action the vector search
+  // shortlisted from the skill's action graph, which one (if any) the
+  // picker LLM chose, and its stated reasoning. Surfaced in the UI so a
+  // prompt-driven run is inspectable rather than a black box, especially
+  // useful on a step that failed to match anything.
+  agentDecision?: {
+    plannedStep: string;
+    candidates: { description: string; similarity: number; status: "explored" | "unexplored"; role: string }[];
+    pickedIndex: number | null;
+    reasoning: string;
+  };
 }
 
 export interface HealedLocatorRecord {
   locator: ElementLocator;
-  source: "position" | "structural" | "semantic" | "live-llm" | "human-suggestion";
+  source: "position" | "structural" | "content" | "semantic" | "live-llm" | "human-suggestion";
   healedAt: string;
 }
 
@@ -127,6 +140,13 @@ export type ManualInputEvent =
       keyCode: number;
       text?: string;
     };
+
+// One entry in a crawl's goal-directed depth budget — see RunRecord's
+// crawlDepthGoals below and actionGraph.ts's crawlTask.
+export interface CrawlDepthGoal {
+  depth: number;
+  goal: number;
+}
 
 export interface RunRecord {
   id: string;
@@ -163,6 +183,13 @@ export interface RunRecord {
   // many still work — holds the Skill.id being validated. See queue.ts's
   // worker dispatch.
   validateSkillId?: string;
+  // Set alongside crawlSkillId — how many genuinely distinct pages (not
+  // near-duplicates, see actionGraph.ts's crawlTask) to find at each
+  // hop-distance from the start page before the crawl stops, e.g.
+  // [{depth:1,goal:2},{depth:2,goal:4}] means "find 2 distinct pages one
+  // click away, 4 two clicks away." Undefined/empty means the original
+  // flat-budget behavior (MAX_PAGES/MAX_DEPTH), not goal-directed at all.
+  crawlDepthGoals?: CrawlDepthGoal[];
   // Set alongside crawlSkillId/validateSkillId — the *source* run whose
   // "Create alternatives" tab this crawl/validation was launched from
   // (src/components/SkillActionGraph.tsx), not this crawl/validate run's own
@@ -182,49 +209,69 @@ export interface RunRecord {
   // instruction it's carrying out. See queue.ts's worker dispatch.
   agentSkillId?: string;
   agentPrompt?: string;
+  // Set when this run executes a multi-step alternative plan (src/server/
+  // alternativesAgent.ts's generateAlternativePlans, src/server/
+  // variation.ts's variantTask) rather than the older single-click variant
+  // — an ordered list of locators to click one after another, each on the
+  // page the previous click landed on. variantTargetLocator above still
+  // holds the *first* hop for backward compatibility with anything reading
+  // just that field; this holds the full sequence (length 1 for what used
+  // to be a plain single-click variant, length 2+ for a real plan).
+  variantPlanSteps?: ElementLocator[];
 }
 
-// One real, already-discovered element the alternative-suggestion pipeline
+// One real, already-discovered element the alternative-plan pipeline
 // (src/server/alternativesAgent.ts) considers a genuinely distinct,
-// meaningful alternative to a recorded step — `locator` always traces back
-// to something `listInteractiveElements` (src/server/variationDiscovery.ts)
-// actually found on the live page, never invented.
+// meaningful alternative — `locator` always traces back to something
+// `listInteractiveElements` (src/server/variationDiscovery.ts) actually
+// found on the live page, never invented. One hop in an AlternativePlan
+// below; a depth-1 plan is just `{ steps: [oneHop] }`.
 export interface AlternativeSuggestion {
   description: string;
   locator: ElementLocator;
   reasoning: string;
 }
 
-// Cached per-step output of the alternative-suggestion pipeline, stored on
-// Run.alternativeSuggestions keyed by step index (as a plain object, since
+// A full alternative path — one or more hops (AlternativeSuggestion) clicked
+// in order, each on the page the previous hop landed on, starting from the
+// recorded step's own page. `steps.length` is this plan's depth. Two plans
+// of the *same* depth are only both kept if their `finalUrl`s differ — see
+// generateAlternativePlans's per-depth dedup in src/server/alternativesAgent.ts.
+export interface AlternativePlan {
+  steps: AlternativeSuggestion[];
+  finalUrl: string;
+  finalDescription: string;
+}
+
+// Cached per-step output of the alternative-plan pipeline, stored on
+// Run.alternativePlans keyed by step index (as a plain object, since
 // Postgres Json columns don't preserve Map/array-sparseness well).
-export type AlternativeSuggestionsByStep = Record<
+export type AlternativePlansByStep = Record<
   string,
   {
-    candidates: AlternativeSuggestion[];
+    plans: AlternativePlan[];
     model: string;
     generatedAt: string;
+    depthGoals: CrawlDepthGoal[];
     // Artifact filename (uploadArtifact/getArtifactStream, this Run's own
-    // id) for the page screenshot explorePageNode (src/server/
-    // alternativesAgent.ts) captured while building its "page
-    // understanding" — persisted so the exploration that produced these
-    // suggestions can be reviewed later, not just discarded after the LLM
-    // call. Absent for suggestions generated before this was added, or if
-    // the screenshot capture itself failed.
-    explorationScreenshot?: string;
+    // id) for the target step's own page screenshot, captured once up front
+    // — the graph UI's root node. Absent if the capture itself failed.
+    rootScreenshot?: string;
   }
 >;
 
-// Emitted while src/server/alternativesAgent.ts's generateAlternativeSuggestions()
+// Emitted while src/server/alternativesAgent.ts's generateAlternativePlans()
 // runs — published to Redis (src/server/redisPubSub.ts) by the alternatives
 // worker (src/server/alternativesQueue.ts, a separate process from the web
 // server) and relayed to the client as newline-delimited JSON by
 // /api/runs/[runId]/alternatives/suggest, same "show what stage it's at"
-// reasoning as FlowSummaryProgress below.
+// reasoning as FlowSummaryProgress below. `visited`/`plansFound` update
+// continuously through "exploring" since a plan search can visit many pages
+// before settling — a single "thinking..." spinner would give no sense of
+// whether it's making progress or stuck.
 export type AlternativesProgress =
   | { phase: "loading-context" }
-  | { phase: "exploring-page" }
-  | { phase: "deciding-alternatives" };
+  | { phase: "exploring"; visited: number; plansFound: number };
 
 // Emitted while src/server/flowSummary.ts's generateFlowSummary() runs, so a
 // caller (the /api/runs/[runId]/summary route, streamed to the client) can

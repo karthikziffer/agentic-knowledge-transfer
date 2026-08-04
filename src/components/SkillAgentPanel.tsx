@@ -128,7 +128,19 @@ export default function SkillAgentPanel({
 
       {runId && (
         <div className="lg:h-[560px] lg:min-h-0">
-          <LiveRunView runId={runId} endControl="stop" />
+          <LiveRunView
+            runId={runId}
+            endControl="stop"
+            // Fires immediately on a successful Stop instead of waiting for
+            // this component's own poll to notice up to POLL_MS later —
+            // Stop should re-enable the prompt/URL fields and "Run agent"
+            // right away, not after a multi-second delay.
+            onStatusChange={(status) => {
+              if (status === "completed" || status === "error") {
+                setRunId(null);
+              }
+            }}
+          />
         </div>
       )}
     </div>

@@ -59,7 +59,7 @@ export default function Sidebar({
               A
             </span>
             <Link href="/" className="truncate text-[13px] font-semibold tracking-tight text-ink">
-              agentic-knowledge-transfer
+              agenticKT
             </Link>
           </div>
         )}

@@ -92,11 +92,7 @@ export default function DashboardProjectsTable({ projects }: { projects: Dashboa
                   project.skills.map((skill) => (
                     <Link
                       key={skill.id}
-                      href={
-                        skill.lastRun
-                          ? `/projects/${project.id}/skills/${skill.id}/prompts/${skill.lastRun.promptId}/runs/${skill.lastRun.id}`
-                          : `/projects/${project.id}/skills/${skill.id}`
-                      }
+                      href={`/projects/${project.id}/skills/${skill.id}`}
                       className={`group grid ${COLS} items-center gap-3 border-b border-edge/60 py-2.5 pr-4 pl-11 transition-colors last:border-b-0 hover:bg-surface-2`}
                     >
                       <span />

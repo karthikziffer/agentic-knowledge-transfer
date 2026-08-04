@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/Toast";
+import AgentDecisionPanel from "@/components/AgentDecisionPanel";
 import type { ControlModeReason, ManualInputEvent, RunRecord, StepResult } from "@/server/types";
 
 type WsMessage =
@@ -76,6 +77,9 @@ export default function LiveRunView({
   const [controlMode, setControlMode] = useState<"auto" | "manual">("auto");
   const [controlReason, setControlReason] = useState<ControlModeReason | undefined>(undefined);
   const [continueWarning, setContinueWarning] = useState<string | null>(null);
+  // Which step's decision-trail disclosure (step.agentDecision) is open, if
+  // any — only steps from an Agent run have one to expand.
+  const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -167,8 +171,35 @@ export default function LiveRunView({
   // /api/runs/{id}/stop route already exposes for the run list's own stop
   // action), which crawlTask/validateTask's loops actually check, unlike
   // "finish" above.
-  function stopRun() {
-    void fetch(`/api/runs/${runId}/stop`, { method: "POST" }).catch(() => {});
+  async function stopRun() {
+    try {
+      const res = await fetch(`/api/runs/${runId}/stop`, { method: "POST" });
+      if (!res.ok) {
+        // Previously swallowed silently — a click that fails (e.g. the run
+        // already finished/errored moments earlier, so it's no longer
+        // "running"/"queued" server-side) looked exactly like a click that
+        // did nothing at all, with zero feedback either way.
+        const body = await res.json().catch(() => ({}));
+        toast.error(body.error ?? "Failed to stop this run");
+        return;
+      }
+      // Stop takes priority over waiting for the server to confirm — a
+      // successful stop request means this run is done, full stop, so
+      // reflect that immediately rather than sitting in "queued"/"running"
+      // until the next WS "status" push (or, if the socket already closed,
+      // the next poll tick) catches up. Anything upstream tracking "is this
+      // run still active" via onStatusChange (e.g. SkillActionGraph's
+      // crawl/validate buttons) learns about it right away instead of
+      // staying disabled for up to a few seconds after Stop was clicked.
+      // The eventual WS "status" message still arrives and overwrites this
+      // with the authoritative error text — this is just the immediate,
+      // optimistic signal.
+      setStatus("error");
+      setError("Stopped by user");
+      onStatusChange?.("error");
+    } catch {
+      toast.error("Failed to stop this run — check your connection and try again");
+    }
   }
 
   function resumeReplay() {
@@ -182,29 +213,29 @@ export default function LiveRunView({
   // Scales a click/move position from the displayed (CSS-sized) image to
   // the actual frame pixel space the CDP session expects (1280x800).
   //
-  // The <img> uses object-contain (className below), so whenever the
-  // element's own box aspect ratio doesn't exactly match the frame's
-  // (1280x800 = 1.6:1 — true whenever the container isn't that exact
-  // shape, which is normal at most window sizes past the lg breakpoint,
-  // where the frame box just fills available flex space), the picture
-  // is letterboxed/pillarboxed *inside* that box rather than filling it.
-  // getBoundingClientRect() still reports the full box, not the smaller
-  // visible-picture rect — naively dividing by the full box size (the old
-  // code here) drifts further from the real cursor position the more the
-  // box's aspect ratio diverges from the frame's, which is exactly the
-  // "cursor is far away" symptom. Compute the actual rendered picture's
-  // sub-rect first (contain-fit math) and map against that instead.
+  // The <img> uses object-cover (className below) so the frame always fills
+  // its box completely with no letterbox bars — whenever the box's own
+  // aspect ratio doesn't exactly match the frame's (1280x800 = 1.6:1), the
+  // picture is scaled up until it fully covers the box and the overflow on
+  // one axis is cropped off, centered. getBoundingClientRect() still
+  // reports the (smaller) visible box, not the larger true rendered image —
+  // naively dividing by the box size drifts the more the box's aspect ratio
+  // diverges from the frame's. Compute the true rendered image's rect
+  // (cover-fit math: scale by the *larger* ratio, not the smaller one
+  // object-contain would use) and map against that instead, so a click near
+  // a cropped edge still lands on the right pixel of the real page rather
+  // than one that's already scrolled off-screen.
   function frameCoords(e: { clientX: number; clientY: number }): { x: number; y: number } | null {
     const img = imgRef.current;
     if (!img || !img.naturalWidth || !img.naturalHeight) return null;
     const rect = img.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
 
-    const scale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+    const scale = Math.max(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
     const renderedWidth = img.naturalWidth * scale;
     const renderedHeight = img.naturalHeight * scale;
-    const offsetX = rect.left + (rect.width - renderedWidth) / 2;
-    const offsetY = rect.top + (rect.height - renderedHeight) / 2;
+    const offsetX = rect.left - (renderedWidth - rect.width) / 2;
+    const offsetY = rect.top - (renderedHeight - rect.height) / 2;
 
     const x = (e.clientX - offsetX) / scale;
     const y = (e.clientY - offsetY) / scale;
@@ -342,8 +373,21 @@ export default function LiveRunView({
                 src={`data:image/jpeg;base64,${frame}`}
                 alt="Live browser view"
                 draggable={false}
-                className="h-full w-full select-none object-contain"
+                className="h-full w-full select-none object-cover"
               />
+            ) : status === "error" || status === "completed" ? (
+              // The run already reached a terminal state without ever
+              // sending a frame — e.g. it was caught as orphaned
+              // (queue.ts's markRunLost) or errored before the browser
+              // finished launching. A spinner + "waiting" here would
+              // falsely suggest something is still in progress; nothing
+              // will ever arrive for this run.
+              <div className="flex flex-col items-center gap-2 px-4 text-center">
+                <span className="text-lg text-white/30">✕</span>
+                <p className="font-mono text-xs text-white/40">
+                  No live frame was captured — this run ended before a browser view was available.
+                </p>
+              </div>
             ) : (
               <div className="flex flex-col items-center gap-2">
                 <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white/50" />
@@ -395,27 +439,47 @@ export default function LiveRunView({
 
         {steps.length > 0 && (
           <ol className="card overflow-y-auto lg:h-full lg:min-h-0">
-            {steps.map((step) => (
-              <li key={step.index} className="row flex items-center gap-3">
-                <StatusBadge status={step.status} />
-                <span className="flex-1 truncate text-[13px] text-ink">
-                  {step.description ?? step.type}
-                </span>
-                {step.replayOf !== undefined && <span className="pill pill-done shrink-0">auto</span>}
-                {step.recordedAmbiguityWarning && (
-                  <span
-                    className="shrink-0 text-amber-600"
-                    title={step.recordedAmbiguityWarning}
-                    aria-label={step.recordedAmbiguityWarning}
+            {steps.map((step) => {
+              const hasDecision = Boolean(step.agentDecision);
+              const isExpanded = expandedStep === step.index;
+              return (
+                <li key={step.index} className="flex flex-col">
+                  <button
+                    type="button"
+                    disabled={!hasDecision}
+                    onClick={() => setExpandedStep(isExpanded ? null : step.index)}
+                    className="row flex w-full items-center gap-3 text-left disabled:cursor-default"
                   >
-                    ⚠
-                  </span>
-                )}
-                {step.error && (
-                  <span className="max-w-[40%] truncate text-xs text-error">{step.error}</span>
-                )}
-              </li>
-            ))}
+                    <StatusBadge status={step.status} />
+                    <span className="flex-1 truncate text-[13px] text-ink">
+                      {step.description ?? step.type}
+                    </span>
+                    {step.replayOf !== undefined && <span className="pill pill-done shrink-0">auto</span>}
+                    {step.recordedAmbiguityWarning && (
+                      <span
+                        className="shrink-0 text-amber-600"
+                        title={step.recordedAmbiguityWarning}
+                        aria-label={step.recordedAmbiguityWarning}
+                      >
+                        ⚠
+                      </span>
+                    )}
+                    {step.error && (
+                      <span className="max-w-[40%] truncate text-xs text-error">{step.error}</span>
+                    )}
+                    {hasDecision && (
+                      <span className="shrink-0 text-ink-faint">{isExpanded ? "▾" : "▸"}</span>
+                    )}
+                  </button>
+
+                  {hasDecision && isExpanded && (
+                    <div className="border-t border-edge bg-surface-2/60 px-3 py-2.5">
+                      <AgentDecisionPanel decision={step.agentDecision!} />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ol>
         )}
       </div>

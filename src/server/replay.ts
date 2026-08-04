@@ -6,8 +6,9 @@ import {
   screenshotStep,
   domSnapshot,
   uploadDomSnapshot,
-  moveCursorOverlay,
+  glideCursorTo,
   triggerClickRipple,
+  settleAfterAction,
   wireManualControl,
   waitUntilStopped,
   finalizeWithoutRunning,
@@ -171,7 +172,7 @@ async function logReplayStep(
   domBeforeHtml?: string,
 ): Promise<StepResult> {
   const step = job.addStep(partial);
-  await page.waitForTimeout(150).catch(() => {});
+  await settleAfterAction(page);
   step.url = page.url();
   step.screenshot = await screenshotStep(page, job.record.id, step.index).catch(() => undefined);
   step.domBefore = await uploadDomSnapshot(job.record.id, step.index, "before", domBeforeHtml);
@@ -218,7 +219,7 @@ async function walkSourceSteps(
       if (box) {
         const x = box.x + box.width / 2;
         const y = box.y + box.height / 2;
-        moveCursorOverlay(cdp, x, y);
+        await glideCursorTo(page, cdp, x, y);
         triggerClickRipple(cdp, x, y);
       }
       await target.click({ timeout: 5000 });
@@ -298,7 +299,7 @@ async function walkSourceSteps(
           if (box) {
             const x = box.x + box.width / 2;
             const y = box.y + box.height / 2;
-            moveCursorOverlay(cdp, x, y);
+            await glideCursorTo(page, cdp, x, y);
             triggerClickRipple(cdp, x, y);
           }
           try {
@@ -329,8 +330,17 @@ async function walkSourceSteps(
             // falls through to the drift handoff below
           }
         } else {
+          // "not found" has no candidates at all — nothing for
+          // suggestFromCandidates (driftAssist.ts's stage 1) to compare, so
+          // it degrades to a no-op immediately. suggestFromWholePage (stage
+          // 2) doesn't need any, though — it independently scans every real
+          // interactive element on the live page, which is exactly the
+          // right tool when the recorded locator now matches nothing at
+          // all (the element was renamed/removed, or the page restructured
+          // around it). Previously this whole call was skipped for "not
+          // found", leaving it the one drift reason with zero AI help.
           const driftSuggestion =
-            result.reason !== "not found" && sourceStep.screenshot && job.record.sourceRunId
+            sourceStep.screenshot && job.record.sourceRunId
               ? await suggestDriftCandidate({
                   page,
                   cdp,
@@ -339,7 +349,9 @@ async function walkSourceSteps(
                   sourceRunId: job.record.sourceRunId,
                   recordedScreenshotFile: sourceStep.screenshot,
                   targetDescription: sourceStep.description ?? sourceStep.type,
-                  candidates: result.candidates,
+                  candidates: result.reason === "not found" ? [] : result.candidates,
+                  positionDistances: result.reason === "not found" ? undefined : result.positionDistances,
+                  contentSimilarities: result.reason === "not found" ? undefined : result.contentSimilarities,
                 })
               : undefined;
 

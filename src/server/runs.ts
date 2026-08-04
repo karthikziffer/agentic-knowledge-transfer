@@ -1,8 +1,9 @@
 import { prisma } from "./db";
 import type { Prisma, Run as PrismaRun } from "@/generated/prisma/client";
 import type {
-  AlternativeSuggestion,
-  AlternativeSuggestionsByStep,
+  AlternativePlan,
+  AlternativePlansByStep,
+  CrawlDepthGoal,
   ElementLocator,
   HealedLocatorRecord,
   RunFlowSummary,
@@ -35,7 +36,9 @@ function toRunRecord(row: PrismaRun): RunRecord {
     variantIndex: row.variantIndex ?? undefined,
     variantLabel: row.variantLabel ?? undefined,
     variantTargetLocator: (row.variantTargetLocator as unknown as ElementLocator | null) ?? undefined,
+    variantPlanSteps: (row.variantPlanSteps as unknown as ElementLocator[] | null) ?? undefined,
     crawlSkillId: row.crawlSkillId ?? undefined,
+    crawlDepthGoals: (row.crawlDepthGoals as unknown as CrawlDepthGoal[] | null) ?? undefined,
     validateSkillId: row.validateSkillId ?? undefined,
     validateCount: row.validateCount ?? undefined,
     agentSkillId: row.agentSkillId ?? undefined,
@@ -61,7 +64,13 @@ export async function insertRun(record: RunRecord) {
       variantTargetLocator: record.variantTargetLocator
         ? (JSON.parse(JSON.stringify(record.variantTargetLocator)) as Prisma.InputJsonValue)
         : undefined,
+      variantPlanSteps: record.variantPlanSteps
+        ? (JSON.parse(JSON.stringify(record.variantPlanSteps)) as Prisma.InputJsonValue)
+        : undefined,
       crawlSkillId: record.crawlSkillId,
+      crawlDepthGoals: record.crawlDepthGoals
+        ? (JSON.parse(JSON.stringify(record.crawlDepthGoals)) as Prisma.InputJsonValue)
+        : undefined,
       validateSkillId: record.validateSkillId,
       validateCount: record.validateCount,
       agentSkillId: record.agentSkillId,
@@ -235,45 +244,47 @@ export async function getSkillsMd(runId: string): Promise<string | null> {
   return row?.skillsMd ?? null;
 }
 
-type AlternativeSuggestionEntry = AlternativeSuggestionsByStep[string];
+type AlternativePlanEntry = AlternativePlansByStep[string];
 
-// Cached output of the alternative-suggestion pipeline
+// Cached output of the alternative-plan pipeline
 // (src/server/alternativesAgent.ts), one entry per step index — a
-// read-modify-write since the column holds every step's suggestions
-// together, not just the one being (re)generated.
-export async function saveAlternativeSuggestions(
+// read-modify-write since the column holds every step's plans together, not
+// just the one being (re)generated.
+export async function saveAlternativePlans(
   runId: string,
   stepIndex: number,
-  candidates: AlternativeSuggestion[],
+  plans: AlternativePlan[],
   model: string,
-  explorationScreenshot?: string,
-): Promise<AlternativeSuggestionEntry> {
+  depthGoals: CrawlDepthGoal[],
+  rootScreenshot?: string,
+): Promise<AlternativePlanEntry> {
   const row = await prisma.run.findUnique({
     where: { id: runId },
-    select: { alternativeSuggestions: true },
+    select: { alternativePlans: true },
   });
-  const existing = (row?.alternativeSuggestions as unknown as AlternativeSuggestionsByStep | null) ?? {};
-  const entry: AlternativeSuggestionEntry = {
-    candidates,
+  const existing = (row?.alternativePlans as unknown as AlternativePlansByStep | null) ?? {};
+  const entry: AlternativePlanEntry = {
+    plans,
     model,
     generatedAt: new Date().toISOString(),
-    explorationScreenshot,
+    depthGoals,
+    rootScreenshot,
   };
-  const next: AlternativeSuggestionsByStep = { ...existing, [String(stepIndex)]: entry };
+  const next: AlternativePlansByStep = { ...existing, [String(stepIndex)]: entry };
 
   await prisma.run.update({
     where: { id: runId },
     data: {
-      alternativeSuggestions: JSON.parse(JSON.stringify(next)) as Prisma.InputJsonValue,
-      alternativeSuggestionsModel: model,
-      alternativeSuggestionsGeneratedAt: new Date(entry.generatedAt),
+      alternativePlans: JSON.parse(JSON.stringify(next)) as Prisma.InputJsonValue,
+      alternativePlansModel: model,
+      alternativePlansGeneratedAt: new Date(entry.generatedAt),
     },
   });
   return entry;
 }
 
 // Writes a proven-good replacement locator back onto the *source* run's own
-// recorded step — read-modify-write, same reasoning as saveAlternativeSuggestions
+// recorded step — read-modify-write, same reasoning as saveAlternativePlans
 // above (the column holds every step's data together). Every future replay
 // of this flow tries this healed override first (locatorReplay.ts's
 // resolveHealedLocator, called from replay.ts's walkSourceSteps) before
@@ -308,16 +319,15 @@ export async function healSourceStepLocator(
 }
 
 // Cache-only read — never runs the pipeline, just returns whatever's
-// already stored (or null if this step has never had suggestions
-// generated).
-export async function getAlternativeSuggestions(
+// already stored (or null if this step has never had plans generated).
+export async function getAlternativePlans(
   runId: string,
   stepIndex: number,
-): Promise<AlternativeSuggestionEntry | null> {
+): Promise<AlternativePlanEntry | null> {
   const row = await prisma.run.findUnique({
     where: { id: runId },
-    select: { alternativeSuggestions: true },
+    select: { alternativePlans: true },
   });
-  const all = (row?.alternativeSuggestions as unknown as AlternativeSuggestionsByStep | null) ?? null;
+  const all = (row?.alternativePlans as unknown as AlternativePlansByStep | null) ?? null;
   return all?.[String(stepIndex)] ?? null;
 }

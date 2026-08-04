@@ -1,6 +1,6 @@
 import { EventEmitter } from "events";
 import { nanoid } from "nanoid";
-import type { ControlModeReason, ElementLocator, ManualInputEvent, RunRecord, StepResult } from "./types";
+import type { ControlModeReason, CrawlDepthGoal, ElementLocator, ManualInputEvent, RunRecord, StepResult } from "./types";
 import { insertRun } from "./runs";
 import { trackRunEvent } from "./analytics";
 
@@ -25,10 +25,17 @@ export interface CreateRunParams {
   // (src/server/alternativesAgent.ts) decided on — variantTask clicks this
   // directly rather than rediscovering/narrowing anything itself.
   variantTargetLocator?: ElementLocator;
+  // Full ordered hop sequence — see types.ts's RunRecord field of the same
+  // name. variantTargetLocator above is still set to steps[0] for anything
+  // reading just that field.
+  variantPlanSteps?: ElementLocator[];
   variantLabel?: string;
   // Set when this run is a whole-site action-graph crawl for a skill
   // (src/server/actionGraph.ts) — see queue.ts's worker branch.
   crawlSkillId?: string;
+  // Set alongside crawlSkillId — see types.ts's RunRecord field of the same
+  // name.
+  crawlDepthGoals?: CrawlDepthGoal[];
   // Set when this run batch-executes every cataloged action in a skill's
   // action graph (src/server/actionGraph.ts's validateTask) — see queue.ts's
   // worker branch.
@@ -76,8 +83,10 @@ export class RunJob extends EventEmitter {
       variantOfStepIndex: params.variantOfStepIndex,
       variantIndex: params.variantIndex,
       variantTargetLocator: params.variantTargetLocator,
+      variantPlanSteps: params.variantPlanSteps,
       variantLabel: params.variantLabel,
       crawlSkillId: params.crawlSkillId,
+      crawlDepthGoals: params.crawlDepthGoals,
       validateSkillId: params.validateSkillId,
       validateCount: params.validateCount,
       graphRunId: params.graphRunId,

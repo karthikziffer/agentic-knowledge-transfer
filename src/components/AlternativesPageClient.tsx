@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import AlternativeSuggestions from "@/components/AlternativeSuggestions";
-import type { AlternativeSuggestion, RunRecord, StepResult } from "@/server/types";
+import type { AlternativePlan, CrawlDepthGoal, RunRecord, StepResult } from "@/server/types";
 
 const POLL_MS = 2000;
 
@@ -17,7 +17,7 @@ export default function AlternativesPageClient({
   promptId,
   steps,
   initialVariantRuns,
-  initialSuggestionsByStep,
+  initialPlansByStep,
 }: {
   runId: string;
   projectId: string;
@@ -25,11 +25,11 @@ export default function AlternativesPageClient({
   promptId: string;
   steps: StepResult[];
   initialVariantRuns: RunRecord[];
-  // Cache-only prefetch (src/server/runs.ts's getAlternativeSuggestions) —
-  // null for a step that's never had "Find alternatives" run on it.
-  initialSuggestionsByStep: Record<
+  // Cache-only prefetch (src/server/runs.ts's getAlternativePlans) — null
+  // for a step that's never had "Plan alternatives" run on it.
+  initialPlansByStep: Record<
     number,
-    { candidates: AlternativeSuggestion[]; model: string; explorationScreenshot?: string } | null
+    { plans: AlternativePlan[]; model: string; depthGoals: CrawlDepthGoal[]; rootScreenshot?: string } | null
   >;
 }) {
   const [variantRuns, setVariantRuns] = useState(initialVariantRuns);
@@ -70,7 +70,7 @@ export default function AlternativesPageClient({
     variantsByStep.set(run.variantOfStepIndex, list);
   }
 
-  function handleGenerated(stepIndex: number, runId: string, candidate: AlternativeSuggestion) {
+  function handleGenerated(stepIndex: number, runId: string, planLabel: string) {
     const placeholder: RunRecord = {
       id: runId,
       userId: "",
@@ -81,15 +81,18 @@ export default function AlternativesPageClient({
       createdAt: new Date().toISOString(),
       steps: [],
       variantOfStepIndex: stepIndex,
-      variantLabel: candidate.description,
-      variantTargetLocator: candidate.locator,
+      variantLabel: planLabel,
     };
     setVariantRuns((prev) => [placeholder, ...prev]);
   }
 
+  const clickSteps = steps.filter(
+    (s) => s.locator && (s.type === "manual-click" || s.type === "replay-click"),
+  );
+
   return (
     <div className="flex flex-col gap-4">
-      {steps.map((step) => (
+      {clickSteps.map((step) => (
         <div key={step.index} className="card flex items-start gap-4 p-4">
           {step.screenshot ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -114,10 +117,11 @@ export default function AlternativesPageClient({
                 promptId={promptId}
                 stepIndex={step.index}
                 existing={variantsByStep.get(step.index) ?? []}
-                initialSuggestions={initialSuggestionsByStep[step.index]?.candidates ?? null}
-                initialModel={initialSuggestionsByStep[step.index]?.model}
-                initialExplorationScreenshot={initialSuggestionsByStep[step.index]?.explorationScreenshot}
-                onGenerated={(runId, candidate) => handleGenerated(step.index, runId, candidate)}
+                initialPlans={initialPlansByStep[step.index]?.plans ?? null}
+                initialModel={initialPlansByStep[step.index]?.model}
+                initialDepthGoals={initialPlansByStep[step.index]?.depthGoals}
+                initialRootScreenshot={initialPlansByStep[step.index]?.rootScreenshot}
+                onGenerated={(runId, planLabel) => handleGenerated(step.index, runId, planLabel)}
               />
             </div>
           </div>

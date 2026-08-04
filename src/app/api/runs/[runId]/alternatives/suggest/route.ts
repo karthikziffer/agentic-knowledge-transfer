@@ -1,15 +1,50 @@
 import { getRun } from "@/server/runManager";
-import { getRunFromDb, getAlternativeSuggestions } from "@/server/runs";
+import { getRunFromDb, getAlternativePlans } from "@/server/runs";
 import { enqueueAlternativesJob, alternativesProgressChannel } from "@/server/alternativesQueue";
 import { subscribeOnce } from "@/server/redisPubSub";
 import { getOptionalSession } from "@/server/dal";
-import type { AlternativesProgress, RunRecord } from "@/server/types";
+import type { AlternativesProgress, CrawlDepthGoal, RunRecord } from "@/server/types";
 
 // Safety net for when no worker process (worker.ts, run as a separate
 // docker-compose service) is up to pick the job off the queue at all — the
 // job just sits "waiting" in Redis forever otherwise, and this stream would
-// hang open with the client spinning indefinitely.
-const JOB_TIMEOUT_MS = 3 * 60_000;
+// hang open with the client spinning indefinitely. Generous — a multi-hop
+// plan search can visit up to MAX_PLAN_ACTIONS pages (alternativesAgent.ts),
+// each a real browser navigation plus two LLM calls, which genuinely can
+// take several minutes for a deep or generous set of depth goals.
+const JOB_TIMEOUT_MS = 8 * 60_000;
+
+const MAX_GOAL_DEPTH = 6;
+const MAX_GOAL_COUNT = 25;
+
+// Mirrors graph/crawl/route.ts's parseDepthGoals — same validation shape,
+// duplicated rather than shared since the two features' depth-goal editors
+// are independent UI (src/components/DepthGoalEditor.tsx) that happen to
+// use the same underlying idea.
+function parseDepthGoals(raw: unknown): CrawlDepthGoal[] | null {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return null;
+  const seen = new Set<number>();
+  const goals: CrawlDepthGoal[] = [];
+  for (const entry of raw) {
+    const depth = (entry as { depth?: unknown })?.depth;
+    const goal = (entry as { goal?: unknown })?.goal;
+    if (
+      !Number.isInteger(depth) ||
+      (depth as number) < 1 ||
+      (depth as number) > MAX_GOAL_DEPTH ||
+      !Number.isInteger(goal) ||
+      (goal as number) < 1 ||
+      (goal as number) > MAX_GOAL_COUNT ||
+      seen.has(depth as number)
+    ) {
+      return null;
+    }
+    seen.add(depth as number);
+    goals.push({ depth: depth as number, goal: goal as number });
+  }
+  return goals;
+}
 
 async function loadOwnedRun(runId: string, userId: string): Promise<RunRecord | null> {
   const job = getRun(runId);
@@ -47,22 +82,24 @@ export async function GET(
     return Response.json({ error: "Invalid step index" }, { status: 400 });
   }
 
-  const cached = await getAlternativeSuggestions(runId, stepIndex);
+  const cached = await getAlternativePlans(runId, stepIndex);
   return Response.json({
-    suggestions: cached?.candidates ?? null,
+    plans: cached?.plans ?? null,
     model: cached?.model,
     generatedAt: cached?.generatedAt,
-    explorationScreenshot: cached?.explorationScreenshot,
+    depthGoals: cached?.depthGoals,
+    rootScreenshot: cached?.rootScreenshot,
   });
 }
 
-// The expensive call — launches a real browser and makes two LLM calls, so
-// it's only ever triggered by an explicit "Find alternatives" click, never
-// automatically. Runs in a separate worker process (worker.ts /
-// src/server/alternativesQueue.ts), not this web request — this just
-// enqueues the job and relays its progress/result back over Redis pub/sub
-// as newline-delimited JSON, same streaming shape /api/runs/[runId]/summary
-// uses for the (in-process) flow-summary agent.
+// The expensive call — launches a real browser and makes repeated LLM calls
+// while planning multi-hop paths, so it's only ever triggered by an
+// explicit "Plan alternatives" click, never automatically. Runs in a
+// separate worker process (worker.ts / src/server/alternativesQueue.ts),
+// not this web request — this just enqueues the job and relays its
+// progress/result back over Redis pub/sub as newline-delimited JSON, same
+// streaming shape /api/runs/[runId]/summary uses for the (in-process)
+// flow-summary agent.
 export async function POST(
   request: Request,
   ctx: RouteContext<"/api/runs/[runId]/alternatives/suggest">,
@@ -87,10 +124,20 @@ export async function POST(
     return Response.json({ error: "Invalid step index" }, { status: 400 });
   }
 
+  const depthGoals = parseDepthGoals(body?.depthGoals);
+  if (depthGoals === null) {
+    return Response.json(
+      {
+        error: `Invalid depth goals — each needs a depth (1-${MAX_GOAL_DEPTH}) and a goal count (1-${MAX_GOAL_COUNT}), with no depth repeated`,
+      },
+      { status: 400 },
+    );
+  }
+
   const step = record.steps[stepIndex];
   if (!step.locator || (step.type !== "manual-click" && step.type !== "replay-click")) {
     return Response.json(
-      { error: "This step has no recorded click target to find alternatives for" },
+      { error: "This step has no recorded click target to plan alternatives for" },
       { status: 400 },
     );
   }
@@ -119,7 +166,7 @@ export async function POST(
       unsubscribe = subscribeOnce(channel, (payload) => {
         const msg = payload as
           | { type: "progress"; progress: AlternativesProgress }
-          | { type: "done"; suggestions: unknown; explorationScreenshot?: string }
+          | { type: "done"; plans: unknown; rootScreenshot?: string }
           | { type: "error"; error: string };
         if (msg.type === "progress") {
           send(msg);
@@ -140,11 +187,11 @@ export async function POST(
         controller.close();
       }, JOB_TIMEOUT_MS);
 
-      enqueueAlternativesJob(runId, stepIndex).catch((err: unknown) => {
+      enqueueAlternativesJob(runId, stepIndex, depthGoals).catch((err: unknown) => {
         if (settled) return;
         settled = true;
         cleanup();
-        const message = err instanceof Error ? err.message : "Failed to queue alternative-suggestion job";
+        const message = err instanceof Error ? err.message : "Failed to queue alternative-plan job";
         send({ type: "error", error: message });
         controller.close();
       });

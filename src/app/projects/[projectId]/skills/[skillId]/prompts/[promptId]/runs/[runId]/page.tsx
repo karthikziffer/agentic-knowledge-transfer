@@ -6,13 +6,13 @@ import {
   getRunSummary,
   getSkillsMd,
   listAllVariantRuns,
-  getAlternativeSuggestions,
+  getAlternativePlans,
 } from "@/server/runs";
 import { hasArtifact } from "@/server/artifacts";
 import { prisma } from "@/server/db";
 import Breadcrumbs from "@/components/Breadcrumbs";
 import FlowSummaryView from "@/components/FlowSummaryView";
-import { StatusBadge } from "@/components/LiveRunView";
+import RunHeader from "@/components/RunHeader";
 import type { RunRecord } from "@/server/types";
 
 export const dynamic = "force-dynamic";
@@ -55,17 +55,17 @@ export default async function RunPage(
     }),
   ]);
 
-  // Cache-only reads — never runs the alternative-suggestion pipeline
-  // itself (src/server/alternativesAgent.ts), just preloads whatever's
-  // already been generated so a revisit doesn't look empty.
+  // Cache-only reads — never runs the alternative-plan pipeline itself
+  // (src/server/alternativesAgent.ts), just preloads whatever's already
+  // been generated so a revisit doesn't look empty.
   const clickSteps = record.steps.filter(
     (s) => s.locator && (s.type === "manual-click" || s.type === "replay-click"),
   );
-  const suggestionEntries = await Promise.all(
-    clickSteps.map((step) => getAlternativeSuggestions(runId, step.index)),
+  const planEntries = await Promise.all(
+    clickSteps.map((step) => getAlternativePlans(runId, step.index)),
   );
-  const initialSuggestionsByStep = Object.fromEntries(
-    clickSteps.map((step, i) => [step.index, suggestionEntries[i]]),
+  const initialPlansByStep = Object.fromEntries(
+    clickSteps.map((step, i) => [step.index, planEntries[i]]),
   );
 
   return (
@@ -84,16 +84,18 @@ export default async function RunPage(
         ]}
       />
 
-      <div className="mb-5 flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="eyebrow">Run</h1>
-          <p className="text-[13px] text-ink">{describeRunKind(record)}</p>
-          <p className="font-mono text-xs text-ink-faint">
-            {new Date(record.createdAt).toLocaleString()}
-          </p>
-        </div>
-        <StatusBadge status={record.status} />
-      </div>
+      <RunHeader
+        runId={runId}
+        projectId={projectId}
+        skillId={skillId}
+        runKind={describeRunKind(record)}
+        createdAt={record.createdAt}
+        status={record.status}
+        startUrl={record.startUrl}
+        stepCount={record.steps.length}
+        startedAt={record.startedAt}
+        finishedAt={record.finishedAt}
+      />
 
       {record.error && (
         <p className="mb-4 rounded-md border border-error/25 bg-error/10 px-3 py-2 text-[13px] text-error">
@@ -108,13 +110,11 @@ export default async function RunPage(
         promptId={promptId}
         skillName={promptWithNames?.skill.name ?? "skill"}
         startUrl={record.startUrl}
-        startedAt={record.startedAt}
-        finishedAt={record.finishedAt}
         initialSummary={summary}
         initialSkillsMd={skillsMd}
         steps={record.steps}
         initialVariantRuns={variantRuns}
-        initialSuggestionsByStep={initialSuggestionsByStep}
+        initialPlansByStep={initialPlansByStep}
         hasVideo={hasVideo}
         hasTrace={hasTrace}
       />

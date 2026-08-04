@@ -19,7 +19,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "agentic-knowledge-transfer",
+  title: "agenticKT",
   description: "Record a browser workflow with Playwright and turn it into a reusable agentic skill.",
 };
 
@@ -70,7 +70,7 @@ export default async function RootLayout({
                     <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-[13px] font-bold text-white">
                       A
                     </span>
-                    <span className="font-semibold tracking-tight">agentic-knowledge-transfer</span>
+                    <span className="font-semibold tracking-tight">agenticKT</span>
                   </Link>
                   <div className="flex-1" />
                   <Link href="/login" className="text-ink-muted hover:text-ink">

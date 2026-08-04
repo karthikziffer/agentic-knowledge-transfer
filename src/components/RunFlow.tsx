@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { StatusBadge } from "@/components/LiveRunView";
 import Modal from "@/components/Modal";
+import AgentDecisionPanel from "@/components/AgentDecisionPanel";
 import type { StepResult } from "@/server/types";
 
 const STEP_TYPE_LABELS: Record<string, string> = {
@@ -33,7 +34,11 @@ interface Node {
   reversed: boolean;
 }
 
-type ModalState = { kind: "image"; step: StepResult } | { kind: "dom"; step: StepResult } | null;
+type ModalState =
+  | { kind: "image"; step: StepResult }
+  | { kind: "dom"; step: StepResult }
+  | { kind: "decision"; step: StepResult }
+  | null;
 
 function layout(steps: StepResult[]): Node[] {
   return steps.map((step, i) => {
@@ -223,15 +228,26 @@ export default function RunFlow({ runId, steps }: { runId: string; steps: StepRe
                           </p>
                         )}
                         {step.error && <p className="line-clamp-1 text-[11px] text-error">{step.error}</p>}
-                        {hasDom && (
-                          <button
-                            type="button"
-                            onClick={() => setModal({ kind: "dom", step })}
-                            className="mt-auto flex items-center gap-1 self-start font-mono text-[10px] font-medium text-accent hover:underline"
-                          >
-                            <DomIcon /> DOM diff
-                          </button>
-                        )}
+                        <div className="mt-auto flex items-center gap-2">
+                          {hasDom && (
+                            <button
+                              type="button"
+                              onClick={() => setModal({ kind: "dom", step })}
+                              className="flex items-center gap-1 self-start font-mono text-[10px] font-medium text-accent hover:underline"
+                            >
+                              <DomIcon /> DOM diff
+                            </button>
+                          )}
+                          {step.agentDecision && (
+                            <button
+                              type="button"
+                              onClick={() => setModal({ kind: "decision", step })}
+                              className="flex items-center gap-1 self-start font-mono text-[10px] font-medium text-accent hover:underline"
+                            >
+                              <DecisionIcon /> Agent decision
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
@@ -269,7 +285,9 @@ export default function RunFlow({ runId, steps }: { runId: string; steps: StepRe
         onClose={() => setModal(null)}
         title={
           modal
-            ? `Step ${modal.step.index + 1} · ${modal.kind === "image" ? "Screenshot" : "DOM diff"}`
+            ? `Step ${modal.step.index + 1} · ${
+                modal.kind === "image" ? "Screenshot" : modal.kind === "dom" ? "DOM diff" : "Agent decision"
+              }`
             : undefined
         }
       >
@@ -287,6 +305,11 @@ export default function RunFlow({ runId, steps }: { runId: string; steps: StepRe
             title="DOM diff"
             className="h-[70vh] w-full border-0"
           />
+        )}
+        {modal?.kind === "decision" && modal.step.agentDecision && (
+          <div className="p-4">
+            <AgentDecisionPanel decision={modal.step.agentDecision} />
+          </div>
         )}
       </Modal>
     </div>
@@ -308,6 +331,25 @@ function ChevronDownIcon({ className = "" }: { className?: string }) {
       aria-hidden
     >
       <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+function DecisionIcon() {
+  return (
+    <svg
+      width={11}
+      height={11}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M9 18l6-6-6-6" />
+      <path d="M4 12h5" />
     </svg>
   );
 }

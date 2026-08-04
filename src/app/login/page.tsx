@@ -47,7 +47,7 @@ export default function LoginPage() {
             A
           </span>
           <h1 className="page-title">Sign in</h1>
-          <p className="text-[13px] text-ink-muted">Welcome back to agentic-knowledge-transfer.</p>
+          <p className="text-[13px] text-ink-muted">Welcome back to agenticKT.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="card flex flex-col gap-3 p-5">

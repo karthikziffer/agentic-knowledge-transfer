@@ -4,16 +4,17 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import EmptyState from "@/components/EmptyState";
 import Modal from "@/components/Modal";
-import DeleteButton from "@/components/DeleteButton";
-import LiveRunView from "@/components/LiveRunView";
+import LiveRunView, { StatusBadge } from "@/components/LiveRunView";
 import RunSectionNav from "@/components/RunSectionNav";
 import SkillActionGraph from "@/components/SkillActionGraph";
 import SkillAgentPanel from "@/components/SkillAgentPanel";
+import AlternativesPageClient from "@/components/AlternativesPageClient";
 import RunFlow from "@/components/RunFlow";
 import Collapsible from "@/components/Collapsible";
 import { useToast } from "@/components/Toast";
 import type {
-  AlternativeSuggestion,
+  AlternativePlan,
+  CrawlDepthGoal,
   ElementLocator,
   FlowSummaryProgress,
   RunFlowSummary,
@@ -134,14 +135,6 @@ function slugify(input: string): string {
   return input.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "skill";
 }
 
-function hostnameOf(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url;
-  }
-}
-
 // Client-side mirror of src/server/skillsMd.ts's formatPlaywrightLocator —
 // same reasoning as slugify() above, kept in sync by hand rather than
 // importing the server module into the client bundle.
@@ -162,22 +155,14 @@ function formatPlaywrightLocator(locator: ElementLocator): string {
   }
 }
 
-function formatDuration(startedAt?: string, finishedAt?: string): string {
-  if (!startedAt || !finishedAt) return "—";
-  const ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  return `${Math.floor(totalSeconds / 60)}m ${(totalSeconds % 60).toString().padStart(2, "0")}s`;
-}
-
-type SectionKey = "artifacts" | "summary" | "skillsmd" | "test" | "alternatives" | "agent";
+type SectionKey = "artifacts" | "summary" | "skillsmd" | "test" | "plan" | "alternatives" | "agent";
 
 const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "artifacts", label: "Session artifacts" },
   { key: "summary", label: "Flow summary" },
   { key: "skillsmd", label: "Skills.md" },
   { key: "test", label: "Test the skill" },
+  { key: "plan", label: "Plan alternatives" },
   { key: "alternatives", label: "Create alternatives" },
   { key: "agent", label: "Agent" },
 ];
@@ -189,13 +174,11 @@ export default function FlowSummaryView({
   promptId,
   skillName,
   startUrl,
-  startedAt,
-  finishedAt,
   initialSummary,
   initialSkillsMd,
   steps,
   initialVariantRuns,
-  initialSuggestionsByStep,
+  initialPlansByStep,
   hasVideo,
   hasTrace,
 }: {
@@ -205,15 +188,13 @@ export default function FlowSummaryView({
   promptId: string;
   skillName: string;
   startUrl: string;
-  startedAt?: string;
-  finishedAt?: string;
   initialSummary: RunFlowSummary | null;
   initialSkillsMd: string | null;
   steps: StepResult[];
   initialVariantRuns: RunRecord[];
-  initialSuggestionsByStep: Record<
+  initialPlansByStep: Record<
     number,
-    { candidates: AlternativeSuggestion[]; model: string } | null
+    { plans: AlternativePlan[]; model: string; depthGoals: CrawlDepthGoal[]; rootScreenshot?: string } | null
   >;
   hasVideo: boolean;
   hasTrace: boolean;
@@ -229,6 +210,7 @@ export default function FlowSummaryView({
   const [skillsMd, setSkillsMd] = useState(initialSkillsMd);
   const [skillsMdLoading, setSkillsMdLoading] = useState(false);
   const [skillsMdError, setSkillsMdError] = useState<string | null>(null);
+  const [showRawSkillsMd, setShowRawSkillsMd] = useState(false);
   const [expandedStep, setExpandedStep] = useState<StepResult | null>(null);
   const [testRunId, setTestRunId] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
@@ -388,28 +370,18 @@ export default function FlowSummaryView({
   }, [testRunId, toast]);
 
   const captionByIndex = new Map(summary?.stepCaptions.map((c) => [c.index, c]) ?? []);
+  const hasSkillsMdChecklist = !!summary && summary.stepCaptions.length > 0;
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="pill pill-queued">{hostnameOf(startUrl)}</span>
-          <span className="pill pill-queued">
-            {stepCount} step{stepCount === 1 ? "" : "s"}
-          </span>
-          <span className="pill pill-queued">{formatDuration(startedAt, finishedAt)}</span>
-          {/* Populated via a portal from SkillActionGraph (only mounted while
-              section === "alternatives") with its Validate/Refresh/score
-              controls — keeps that component's state/logic fully
-              encapsulated while visually relocating the controls here. */}
-          <div ref={setAlternativesControlsSlot} className="flex flex-wrap items-center gap-2" />
-        </div>
-        <DeleteButton
-          endpoint={`/api/runs/${runId}`}
-          confirmMessage="Delete this run and its artifacts?"
-          redirectTo={`/projects/${projectId}/skills/${skillId}`}
-        />
-      </div>
+    <div className="flex flex-col gap-4">
+      {/* Populated via a portal from SkillActionGraph (only mounted while
+          section === "alternatives") with its Validate/Refresh/score
+          controls — keeps that component's state/logic fully encapsulated
+          while visually relocating the controls here. empty:hidden so it
+          takes up no space at all on every other tab, when it has nothing
+          portaled into it. Run identity/status/Delete now live in
+          RunHeader (this run page's own header), not here. */}
+      <div ref={setAlternativesControlsSlot} className="flex flex-wrap items-center gap-2 empty:hidden" />
 
       <RunSectionNav sections={SECTIONS} active={section} onChange={(key) => setSection(key as SectionKey)} />
 
@@ -717,12 +689,64 @@ export default function FlowSummaryView({
           {skillsMdError && <p className="px-5 pb-3 text-[13px] text-error">{skillsMdError}</p>}
           {skillsMd && (
             <div className="border-t border-edge">
-              <div className="flex items-center gap-2 border-b border-edge bg-surface-2/60 px-4 py-2 font-mono text-[11px] text-ink-faint">
-                <FileIcon small /> {slugify(skillName)}-skill.md
-              </div>
-              <pre className="max-h-96 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-muted">
-                {skillsMd}
-              </pre>
+              {hasSkillsMdChecklist ? (
+                <>
+                  <div className="flex items-center justify-between border-b border-edge bg-surface-2/60 px-4 py-2">
+                    <span className="font-mono text-[11px] text-ink-faint">
+                      <FileIcon small /> {slugify(skillName)}-skill.md — steps taken
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowRawSkillsMd((v) => !v)}
+                      className="font-mono text-[11px] font-medium text-ink-faint hover:text-accent"
+                    >
+                      {showRawSkillsMd ? "Hide raw markdown" : "View raw markdown"}
+                    </button>
+                  </div>
+                  <ol className="divide-y divide-edge">
+                    {summary.stepCaptions
+                      .slice()
+                      .sort((a, b) => a.index - b.index)
+                      .map((caption, i) => {
+                        const step = steps.find((s) => s.index === caption.index);
+                        return (
+                          <li key={caption.index} className="flex items-start gap-3 px-4 py-3">
+                            <span className="mt-0.5 shrink-0 font-mono text-[11px] text-ink-faint">{i + 1}.</span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[13px] text-ink">{caption.caption}</p>
+                              {step?.locator ? (
+                                <p className="mt-0.5 truncate font-mono text-[11px] text-ink-faint">
+                                  Target: {formatPlaywrightLocator(step.locator)}
+                                </p>
+                              ) : step?.x !== undefined && step?.y !== undefined ? (
+                                <p className="mt-0.5 font-mono text-[11px] text-ink-faint">
+                                  Coordinates: ({step.x}, {step.y})
+                                </p>
+                              ) : null}
+                            </div>
+                            <span className="shrink-0">
+                              <StatusBadge status={step?.status ?? "pending"} />
+                            </span>
+                          </li>
+                        );
+                      })}
+                  </ol>
+                </>
+              ) : null}
+              {(showRawSkillsMd || !hasSkillsMdChecklist) && (
+                <>
+                  <div
+                    className={`flex items-center gap-2 border-edge bg-surface-2/60 px-4 py-2 font-mono text-[11px] text-ink-faint ${
+                      hasSkillsMdChecklist ? "border-t border-b" : "border-b"
+                    }`}
+                  >
+                    <FileIcon small /> {slugify(skillName)}-skill.md
+                  </div>
+                  <pre className="max-h-96 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-muted">
+                    {skillsMd}
+                  </pre>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -774,6 +798,18 @@ export default function FlowSummaryView({
             </div>
           )}
         </div>
+      )}
+
+      {section === "plan" && (
+        <AlternativesPageClient
+          runId={runId}
+          projectId={projectId}
+          skillId={skillId}
+          promptId={promptId}
+          steps={steps}
+          initialVariantRuns={initialVariantRuns}
+          initialPlansByStep={initialPlansByStep}
+        />
       )}
 
       {section === "alternatives" && (
